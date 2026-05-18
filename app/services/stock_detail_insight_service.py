@@ -33,7 +33,7 @@ def is_a_share_stock(code: str) -> bool:
     )
     if code6.startswith(allowed_prefixes):
         return True
-    return code6.startswith("8") or code6.startswith("4")
+    return False
 
 
 def _safe_float(value: Any) -> Optional[float]:

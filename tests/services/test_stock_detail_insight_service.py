@@ -142,6 +142,6 @@ async def test_get_financial_detail_unsupported_etf():
     assert "ETF" in result["message"]
 
 
-@pytest.mark.parametrize("code", ["200001", "900901", "110031"])
+@pytest.mark.parametrize("code", ["200001", "900901", "110031", "400001", "800001"])
 def test_is_a_share_stock_rejects_non_ordinary_a_share(code):
     assert is_a_share_stock(code) is False
