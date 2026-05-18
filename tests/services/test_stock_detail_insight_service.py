@@ -1,4 +1,7 @@
+import pytest
+
 from app.services.stock_detail_insight_service import (
+    StockDetailInsightService,
     calculate_magic_nine,
     normalize_code6,
 )
@@ -61,3 +64,78 @@ def test_calculate_magic_nine_non_zero_padded_dates_sorted_chronologically():
     assert result["latest_signal"]["direction"] == "up"
     assert result["latest_signal"]["count"] == 9
     assert result["latest_signal"]["date"] == "2026-05-13"
+
+
+class FakeCursor:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, _limit):
+        return self
+
+    async def to_list(self, length=None):
+        return self.docs
+
+
+class FakeCollection:
+    def __init__(self, docs=None):
+        self.docs = docs or []
+        self.updated = []
+
+    def find(self, *_args, **_kwargs):
+        return FakeCursor(self.docs)
+
+    async def update_one(self, query, update, upsert=False):
+        self.updated.append((query, update, upsert))
+
+
+class FakeDb(dict):
+    def __getitem__(self, name):
+        return super().__getitem__(name)
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_uses_cache_without_refresh():
+    db = FakeDb(
+        {
+            "stock_financial_data": FakeCollection(
+                [
+                    {
+                        "symbol": "688049",
+                        "report_period": "20251231",
+                        "data_source": "tushare",
+                        "updated_at": "2026-05-18T20:00:00+08:00",
+                        "raw_data": {
+                            "income_statement": [{"end_date": "20251231", "revenue": 100}],
+                            "balance_sheet": [{"end_date": "20251231", "total_assets": 200}],
+                            "cashflow_statement": [{"end_date": "20251231", "n_cashflow_act": 30}],
+                            "financial_indicators": [{"end_date": "20251231", "roe": 9.5}],
+                            "main_business": [{"end_date": "20251231", "bz_item": "产品A"}],
+                        },
+                    }
+                ]
+            )
+        }
+    )
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_financial_detail("688049", periods=8, refresh=False)
+
+    assert result["status"] == "ok"
+    assert result["is_cached"] is True
+    assert result["source"] == "mongodb"
+    assert result["income_statement"][0]["revenue"] == 100
+    assert result["main_business"][0]["bz_item"] == "产品A"
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_unsupported_etf():
+    service = StockDetailInsightService(db=FakeDb({"stock_financial_data": FakeCollection([])}))
+
+    result = await service.get_financial_detail("588000")
+
+    assert result["status"] == "unsupported"
+    assert "ETF" in result["message"]
