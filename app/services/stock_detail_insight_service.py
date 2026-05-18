@@ -250,7 +250,7 @@ class StockDetailInsightService:
         docs = await cursor.to_list(length=None)
         docs = docs if isinstance(docs, list) else []
 
-        filtered: List[Dict[str, Any]] = []
+        by_symbol: Dict[str, Dict[str, Any]] = {}
         for doc in docs:
             if not isinstance(doc, dict):
                 continue
@@ -262,24 +262,39 @@ class StockDetailInsightService:
                 continue
             doc_copy = dict(doc)
             doc_copy["_code6"] = symbol
-            filtered.append(doc_copy)
+            selected = by_symbol.get(symbol)
+            if selected is None:
+                by_symbol[symbol] = doc_copy
+                continue
 
-        if period != "latest":
-            filtered.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
-            return filtered
+            selected_period = str(selected.get("report_period") or "")
+            current_priority = self._source_priority(doc_copy.get("data_source"))
+            selected_priority = self._source_priority(selected.get("data_source"))
 
-        latest_by_symbol: Dict[str, Dict[str, Any]] = {}
-        for doc in filtered:
-            symbol = doc["_code6"]
-            current_period = str(doc.get("report_period") or "")
-            selected = latest_by_symbol.get(symbol)
-            selected_period = str(selected.get("report_period") or "") if selected else ""
-            if selected is None or current_period > selected_period:
-                latest_by_symbol[symbol] = doc
+            if period == "latest":
+                if report_period > selected_period:
+                    by_symbol[symbol] = doc_copy
+                    continue
+                if report_period == selected_period and current_priority < selected_priority:
+                    by_symbol[symbol] = doc_copy
+            else:
+                if current_priority < selected_priority:
+                    by_symbol[symbol] = doc_copy
 
-        latest_docs = list(latest_by_symbol.values())
-        latest_docs.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
-        return latest_docs
+        deduped = list(by_symbol.values())
+        deduped.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
+        return deduped
+
+    @staticmethod
+    def _source_priority(source: Any) -> int:
+        source_text = str(source or "").lower()
+        if source_text == "tushare":
+            return 0
+        if source_text == "akshare":
+            return 1
+        if source_text == "baostock":
+            return 2
+        return 9
 
     def _metric_value(self, doc: Dict[str, Any], metric: str) -> Optional[float]:
         aliases = {
@@ -320,6 +335,15 @@ class StockDetailInsightService:
                 "percentile": None,
                 "rank": None,
                 "sample_count": 0,
+            }
+
+        if len(values) < 3:
+            return {
+                "stock_value": stock_value,
+                "industry_median": None,
+                "percentile": None,
+                "rank": None,
+                "sample_count": len(values),
             }
 
         industry_median = float(median(values))
@@ -372,11 +396,25 @@ class StockDetailInsightService:
         docs = await self._financial_docs_for_codes(industry_codes, period=period)
         sample_count = len(docs)
 
-        stock_doc: Dict[str, Any] = {}
+        stock_doc: Optional[Dict[str, Any]] = None
         for doc in docs:
             if normalize_code6(doc.get("symbol") or doc.get("code") or doc.get("_code6") or "") == code6:
                 stock_doc = doc
                 break
+
+        if stock_doc is None:
+            return {
+                "status": "empty",
+                "code": code6,
+                "industry": industry,
+                "period": period,
+                "sample_count": sample_count,
+                "message": "未找到目标股票财务数据",
+                "metrics": {},
+                "source": "mongodb",
+                "last_updated": last_updated,
+                "is_cached": True,
+            }
 
         metric_names = [
             "pe",

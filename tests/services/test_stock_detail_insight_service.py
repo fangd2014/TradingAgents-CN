@@ -69,16 +69,28 @@ def test_calculate_magic_nine_non_zero_padded_dates_sorted_chronologically():
 
 class FakeCursor:
     def __init__(self, docs):
-        self.docs = docs
+        self.docs = list(docs)
+        self._limit = None
 
-    def sort(self, *_args, **_kwargs):
+    def sort(self, field, direction=1):
+        reverse = direction == -1
+        self.docs.sort(
+            key=lambda item: (item.get(field) is None, item.get(field)),
+            reverse=reverse,
+        )
         return self
 
-    def limit(self, _limit):
+    def limit(self, limit):
+        self._limit = limit
         return self
 
     async def to_list(self, length=None):
-        return self.docs
+        docs = self.docs
+        if self._limit is not None:
+            docs = docs[: self._limit]
+        if length is not None:
+            docs = docs[:length]
+        return docs
 
 
 class FakeCollection:
@@ -86,8 +98,38 @@ class FakeCollection:
         self.docs = docs or []
         self.updated = []
 
-    def find(self, *_args, **_kwargs):
-        return FakeCursor(self.docs)
+    @staticmethod
+    def _matches(doc, query):
+        if not query:
+            return True
+        for key, expected in query.items():
+            actual = doc.get(key)
+            if isinstance(expected, dict):
+                if "$in" in expected:
+                    if actual not in expected["$in"]:
+                        return False
+                else:
+                    return False
+            elif actual != expected:
+                return False
+        return True
+
+    @staticmethod
+    def _project(doc, projection):
+        if projection is None:
+            return dict(doc)
+
+        include_keys = [key for key, flag in projection.items() if flag and key != "_id"]
+        if include_keys:
+            return {key: doc.get(key) for key in include_keys if key in doc}
+
+        excluded = {key for key, flag in projection.items() if not flag}
+        return {key: value for key, value in doc.items() if key not in excluded}
+
+    def find(self, query=None, projection=None):
+        matched = [doc for doc in self.docs if self._matches(doc, query)]
+        projected = [self._project(doc, projection) for doc in matched]
+        return FakeCursor(projected)
 
     async def update_one(self, query, update, upsert=False):
         self.updated.append((query, update, upsert))
@@ -410,6 +452,10 @@ async def test_get_industry_comparison_sample_insufficient():
 
     assert result["status"] == "sample_insufficient"
     assert result["sample_count"] == 1
+    assert result["metrics"]["roe"]["stock_value"] == 12
+    assert result["metrics"]["roe"]["industry_median"] is None
+    assert result["metrics"]["roe"]["rank"] is None
+    assert result["metrics"]["roe"]["percentile"] is None
 
 
 @pytest.mark.asyncio
@@ -435,3 +481,109 @@ async def test_get_industry_comparison_gross_margin_uses_grossprofit_margin_alia
     assert result["metrics"]["gross_margin"]["stock_value"] == 35.0
     assert result["metrics"]["gross_margin"]["industry_median"] == 35.0
     assert result["metrics"]["gross_margin"]["rank"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_dedupes_duplicate_sources_prefers_tushare():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "data_source": "akshare", "roe": 5},
+                    {"symbol": "688049", "report_period": "20251231", "data_source": "tushare", "roe": 12},
+                    {"symbol": "600001", "report_period": "20251231", "data_source": "tushare", "roe": 8},
+                    {"symbol": "600002", "report_period": "20251231", "data_source": "tushare", "roe": 16},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["roe"]["stock_value"] == 12
+    assert result["metrics"]["roe"]["industry_median"] == 12
+    assert result["metrics"]["roe"]["rank"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_period_filters_exact_report_period():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20241231", "roe": 4, "data_source": "tushare"},
+                    {"symbol": "688049", "report_period": "20251231", "roe": 12, "data_source": "tushare"},
+                    {"symbol": "600001", "report_period": "20241231", "roe": 2, "data_source": "tushare"},
+                    {"symbol": "600001", "report_period": "20251231", "roe": 8, "data_source": "tushare"},
+                    {"symbol": "600002", "report_period": "20241231", "roe": 6, "data_source": "tushare"},
+                    {"symbol": "600002", "report_period": "20251231", "roe": 16, "data_source": "tushare"},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049", period="20241231")
+
+    assert result["status"] == "ok"
+    assert result["period"] == "20241231"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["roe"]["stock_value"] == 4
+    assert result["metrics"]["roe"]["industry_median"] == 4
+    assert result["metrics"]["roe"]["rank"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_target_stock_financial_missing_returns_empty():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "600001", "report_period": "20251231", "roe": 8},
+                    {"symbol": "600002", "report_period": "20251231", "roe": 16},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "empty"
+    assert result["message"] == "未找到目标股票财务数据"
+    assert result["sample_count"] == 2
+    assert result["metrics"] == {}
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_preserves_zero_metric_stock_value():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "roe": 0},
+                    {"symbol": "600001", "report_period": "20251231", "roe": 3},
+                    {"symbol": "600002", "report_period": "20251231", "roe": 6},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["metrics"]["roe"]["stock_value"] == 0
+    assert result["metrics"]["roe"]["industry_median"] == 3
+    assert result["metrics"]["roe"]["rank"] == 3
