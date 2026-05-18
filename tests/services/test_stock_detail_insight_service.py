@@ -45,3 +45,19 @@ def test_calculate_magic_nine_insufficient_data():
 
     assert result["status"] == "insufficient_data"
     assert result["required_bars"] == 13
+
+
+def test_calculate_magic_nine_non_zero_padded_dates_sorted_chronologically():
+    bars = [
+        {"trade_date": f"2026-05-{idx}", "close": close}
+        for idx, close in enumerate([10, 10, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19], start=1)
+    ]
+
+    result = calculate_magic_nine(bars)
+
+    assert result["status"] == "ok"
+    assert result["current_direction"] == "up"
+    assert result["current_count"] == 9
+    assert result["latest_signal"]["direction"] == "up"
+    assert result["latest_signal"]["count"] == 9
+    assert result["latest_signal"]["date"] == "2026-05-13"

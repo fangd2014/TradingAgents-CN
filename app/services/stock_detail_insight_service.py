@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -27,6 +28,32 @@ def _bar_date(bar: Dict[str, Any]) -> str:
     return str(bar.get("trade_date") or bar.get("date") or bar.get("time") or "")
 
 
+def _date_sort_key(date_text: str) -> tuple:
+    text = str(date_text or "").strip()
+    compact_match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", text)
+    if compact_match:
+        year, month, day = (int(part) for part in compact_match.groups())
+        return (0, year, month, day, 0, 0, 0, text)
+
+    separated_match = re.match(
+        (
+            r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})"
+            r"(?:[T\s](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?"
+        ),
+        text,
+    )
+    if separated_match:
+        year = int(separated_match.group(1))
+        month = int(separated_match.group(2))
+        day = int(separated_match.group(3))
+        hour = int(separated_match.group(4) or 0)
+        minute = int(separated_match.group(5) or 0)
+        second = int(separated_match.group(6) or 0)
+        return (0, year, month, day, hour, minute, second, text)
+
+    return (1, text)
+
+
 def calculate_magic_nine(
     bars: List[Dict[str, Any]], lookback: int = 4, target_count: int = 9
 ) -> Dict[str, Any]:
@@ -36,7 +63,7 @@ def calculate_magic_nine(
         for bar in bars
         if _safe_float(bar.get("close")) is not None
     ]
-    cleaned.sort(key=lambda item: item["date"])
+    cleaned.sort(key=lambda item: _date_sort_key(item["date"]))
 
     if len(cleaned) < required_bars:
         return {
