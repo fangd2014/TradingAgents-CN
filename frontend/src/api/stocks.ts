@@ -80,6 +80,56 @@ export interface NewsResponse {
   items: NewsItem[]
 }
 
+export interface FinancialDetailResponse {
+  code: string
+  status: string
+  income_statement: Record<string, any>[]
+  balance_sheet: Record<string, any>[]
+  cashflow_statement: Record<string, any>[]
+  financial_indicators: Record<string, any>[]
+  main_business: Record<string, any>[]
+  summary?: Record<string, any>
+  source?: string
+  last_updated?: string
+  is_cached?: boolean
+  detail_available?: boolean
+  message?: string
+  warning?: string
+}
+
+export interface IndustryComparisonMetric {
+  stock_value: number | null
+  industry_median: number | null
+  percentile: number | null
+  rank: number | null
+  sample_count: number
+}
+
+export interface IndustryComparisonResponse {
+  code: string
+  status: string
+  industry?: string
+  period?: string
+  sample_count?: number
+  metrics: Record<string, IndustryComparisonMetric>
+  source?: string
+  last_updated?: string
+  is_cached?: boolean
+  message?: string
+}
+
+export interface TechnicalFactorsResponse {
+  code: string
+  status: string
+  magic_nine: Record<string, any>
+  factors: Record<string, any>
+  series: Record<string, any>[]
+  source?: string
+  last_updated?: string
+  is_cached?: boolean
+  message?: string
+}
+
 export const stocksApi = {
   /**
    * 获取股票行情
@@ -117,6 +167,17 @@ export const stocksApi = {
    */
   async getNews(symbol: string, days = 30, limit = 50, includeAnnouncements = true) {
     return ApiClient.get<NewsResponse>(`/api/stocks/${symbol}/news`, { days, limit, include_announcements: includeAnnouncements })
+  },
+
+  async getFinancialDetail(symbol: string, periods = 8, refresh = false) {
+    return ApiClient.get<FinancialDetailResponse>(`/api/stocks/${symbol}/financial-detail`, { periods, refresh })
+  },
+
+  async getIndustryComparison(symbol: string, period = 'latest', refresh = false) {
+    return ApiClient.get<IndustryComparisonResponse>(`/api/stocks/${symbol}/industry-comparison`, { period, refresh })
+  },
+
+  async getTechnicalFactors(symbol: string, limit = 120, refresh = false) {
+    return ApiClient.get<TechnicalFactorsResponse>(`/api/stocks/${symbol}/technical-factors`, { limit, refresh })
   }
 }
-

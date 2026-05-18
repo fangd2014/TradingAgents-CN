@@ -125,6 +125,126 @@
           </div>
         </el-card>
 
+        <el-card shadow="hover" class="insights-card" id="stock-detail-insights">
+          <template #header>
+            <div class="card-hd">
+              <div>深度数据</div>
+              <el-button text size="small" :icon="Refresh" @click="refreshCurrentInsight">刷新</el-button>
+            </div>
+          </template>
+
+          <el-tabs v-model="insightTab">
+            <el-tab-pane label="详细财报" name="financial">
+              <el-alert v-if="insightError.financial" type="warning" :title="insightError.financial" show-icon />
+              <el-skeleton v-else-if="insightLoading.financial" :rows="6" animated />
+              <div v-else-if="financialDetail">
+                <div class="insight-meta">
+                  来源：{{ financialDetail.source || '-' }} · 更新时间：{{ financialDetail.last_updated || '-' }}
+                  <el-tag v-if="financialDetail.is_cached" size="small" type="info">缓存</el-tag>
+                  <el-tag v-if="financialDetail.message === 'summary_only'" size="small" type="warning">摘要数据</el-tag>
+                </div>
+                <el-descriptions :column="4" border size="small">
+                  <el-descriptions-item label="ROE">{{ fmtPercent(financialDetail.summary?.roe) }}</el-descriptions-item>
+                  <el-descriptions-item label="ROA">{{ fmtPercent(financialDetail.summary?.roa) }}</el-descriptions-item>
+                  <el-descriptions-item label="毛利率">{{ fmtPercent(financialDetail.summary?.gross_margin) }}</el-descriptions-item>
+                  <el-descriptions-item label="净利率">{{ fmtPercent(financialDetail.summary?.netprofit_margin) }}</el-descriptions-item>
+                  <el-descriptions-item label="资产负债率">{{ fmtPercent(financialDetail.summary?.debt_to_assets) }}</el-descriptions-item>
+                  <el-descriptions-item label="流动比率">{{ fmtNumber(financialDetail.summary?.current_ratio) }}</el-descriptions-item>
+                  <el-descriptions-item label="速动比率">{{ fmtNumber(financialDetail.summary?.quick_ratio) }}</el-descriptions-item>
+                  <el-descriptions-item label="报告期">{{ financialDetail.summary?.report_period || '-' }}</el-descriptions-item>
+                </el-descriptions>
+                <el-tabs class="statement-tabs">
+                  <el-tab-pane label="利润表">
+                    <el-table :data="financialDetail.income_statement || []" size="small" height="260">
+                      <el-table-column prop="end_date" label="报告期" width="110" />
+                      <el-table-column prop="revenue" label="营业收入" />
+                      <el-table-column prop="n_income_attr_p" label="归母净利润" />
+                      <el-table-column prop="oper_profit" label="营业利润" />
+                    </el-table>
+                  </el-tab-pane>
+                  <el-tab-pane label="资产负债表">
+                    <el-table :data="financialDetail.balance_sheet || []" size="small" height="260">
+                      <el-table-column prop="end_date" label="报告期" width="110" />
+                      <el-table-column prop="total_assets" label="总资产" />
+                      <el-table-column prop="total_liab" label="总负债" />
+                      <el-table-column prop="money_cap" label="货币资金" />
+                    </el-table>
+                  </el-tab-pane>
+                  <el-tab-pane label="现金流量表">
+                    <el-table :data="financialDetail.cashflow_statement || []" size="small" height="260">
+                      <el-table-column prop="end_date" label="报告期" width="110" />
+                      <el-table-column prop="n_cashflow_act" label="经营现金流" />
+                      <el-table-column prop="n_cashflow_inv_act" label="投资现金流" />
+                      <el-table-column prop="n_cashflow_fin_act" label="筹资现金流" />
+                    </el-table>
+                  </el-tab-pane>
+                  <el-tab-pane label="主营业务">
+                    <el-table :data="financialDetail.main_business || []" size="small" height="260">
+                      <el-table-column prop="end_date" label="报告期" width="110" />
+                      <el-table-column prop="bz_item" label="项目" />
+                      <el-table-column prop="bz_sales" label="收入" />
+                      <el-table-column prop="bz_profit" label="毛利" />
+                      <el-table-column prop="bz_cost" label="成本" />
+                    </el-table>
+                  </el-tab-pane>
+                </el-tabs>
+              </div>
+              <el-empty v-else description="暂无财报数据" />
+            </el-tab-pane>
+
+            <el-tab-pane label="行业对比" name="industry">
+              <el-alert v-if="insightError.industry" type="warning" :title="insightError.industry" show-icon />
+              <el-skeleton v-else-if="insightLoading.industry" :rows="6" animated />
+              <div v-else-if="industryComparison">
+                <div class="insight-meta">
+                  行业：{{ industryComparison.industry || '-' }} · 样本：{{ industryComparison.sample_count ?? 0 }} · 报告期：{{ industryComparison.period || '-' }}
+                </div>
+                <el-table :data="industryMetricRows" size="small">
+                  <el-table-column prop="label" label="指标" />
+                  <el-table-column prop="stock_value" label="当前股票">
+                    <template #default="{ row }">{{ fmtNumber(row.stock_value) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="industry_median" label="行业中位数">
+                    <template #default="{ row }">{{ fmtNumber(row.industry_median) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="rank" label="行业排名">
+                    <template #default="{ row }">{{ row.rank ?? '-' }}</template>
+                  </el-table-column>
+                  <el-table-column prop="percentile" label="行业分位">
+                    <template #default="{ row }">{{ row.percentile == null ? '-' : `${row.percentile}%` }}</template>
+                  </el-table-column>
+                  <el-table-column prop="sample_count" label="样本数" width="90" />
+                </el-table>
+              </div>
+              <el-empty v-else description="暂无行业对比数据" />
+            </el-tab-pane>
+
+            <el-tab-pane label="技术面因子" name="technical">
+              <el-alert v-if="insightError.technical" type="warning" :title="insightError.technical" show-icon />
+              <el-skeleton v-else-if="insightLoading.technical" :rows="6" animated />
+              <div v-else-if="technicalFactors">
+                <div id="magic-nine-section" class="magic-nine-section">
+                  <h3>神奇九转</h3>
+                  <el-descriptions :column="4" border size="small">
+                    <el-descriptions-item label="方向">{{ technicalFactors.magic_nine?.current_direction || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="计数">{{ technicalFactors.magic_nine?.current_count ?? '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="状态">{{ technicalFactors.magic_nine?.status || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="最近信号">{{ technicalFactors.magic_nine?.latest_signal?.date || '-' }}</el-descriptions-item>
+                  </el-descriptions>
+                </div>
+                <el-table :data="technicalFactorRows" size="small" class="factor-table">
+                  <el-table-column prop="label" label="因子" />
+                  <el-table-column prop="latest" label="最新值">
+                    <template #default="{ row }">{{ formatFactorValue(row) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="signal" label="信号" />
+                </el-table>
+              </div>
+              <el-empty v-else description="暂无技术因子数据" />
+            </el-tab-pane>
+          </el-tabs>
+        </el-card>
+
         <!-- 详细分析结果（方案B）：仅在进行中或有结果时显示 -->
         <el-card v-if="analysisStatus==='running' || lastAnalysis" shadow="hover" class="analysis-detail-card" id="analysis-detail">
           <template #header><div class="card-hd">详细分析结果</div></template>
@@ -276,6 +396,9 @@
             <el-button type="primary" @click="onAnalyze" :icon="TrendCharts" plain>发起分析</el-button>
             <el-button @click="onToggleFavorite" :icon="Star">{{ isFav ? '移出自选' : '加入自选' }}</el-button>
             <el-button type="success" :icon="CreditCard" @click="goPaperTrading">模拟交易</el-button>
+            <el-button type="info" :icon="Document" plain @click="jumpToInsight('financial')">详细财报</el-button>
+            <el-button type="warning" :icon="TrendCharts" plain @click="jumpToInsight('technical')">技术因子</el-button>
+            <el-button type="danger" :icon="TrendCharts" plain @click="jumpToInsight('magic-nine')">神奇九转</el-button>
           </div>
         </el-card>
       </el-col>
@@ -366,6 +489,7 @@ import { analysisApi } from '@/api/analysis'
 import { ApiClient } from '@/api/request'
 import { stockSyncApi } from '@/api/stockSync'
 import { clearAllCache } from '@/api/cache'
+import { targetForInsightShortcut, type StockDetailInsightShortcut, type StockDetailInsightTab } from './detailInsightShortcuts'
 import { use as echartsUse } from 'echarts/core'
 import { CandlestickChart } from 'echarts/charts'
 
@@ -446,6 +570,57 @@ const kOption = ref<EChartsOption>({
 })
 const lastKTime = ref<string | null>(null)
 const lastKClose = ref<number | null>(null)
+
+const insightTab = ref<StockDetailInsightTab>('financial')
+const financialDetail = ref<any | null>(null)
+const industryComparison = ref<any | null>(null)
+const technicalFactors = ref<any | null>(null)
+const insightLoading = reactive({ financial: false, industry: false, technical: false })
+const insightError = reactive({ financial: '', industry: '', technical: '' })
+const loadedInsightTabs = reactive({ financial: false, industry: false, technical: false })
+
+const industryMetricLabels: Record<string, string> = {
+  pe: 'PE',
+  pb: 'PB',
+  ps: 'PS',
+  roe: 'ROE',
+  gross_margin: '毛利率',
+  netprofit_margin: '净利率',
+  debt_to_assets: '资产负债率',
+  revenue_growth: '营收增速',
+  net_profit_growth: '净利润增速',
+  total_mv: '总市值'
+}
+
+const factorLabels: Record<string, string> = {
+  ma_5: 'MA5',
+  ma_20: 'MA20',
+  ema_12: 'EMA12',
+  ema_26: 'EMA26',
+  macd: 'MACD',
+  rsi_14: 'RSI14',
+  boll: 'BOLL',
+  kdj: 'KDJ',
+  atr_14: 'ATR14',
+  volume_ma_5: '5日均量',
+  turnover_summary: '换手率'
+}
+
+const industryMetricRows = computed(() => {
+  return Object.entries(industryComparison.value?.metrics || {}).map(([key, value]: [string, any]) => ({
+    key,
+    label: industryMetricLabels[key] || key,
+    ...(value || {})
+  }))
+})
+
+const technicalFactorRows = computed(() => {
+  return Object.entries(technicalFactors.value?.factors || {}).map(([key, value]: [string, any]) => ({
+    key,
+    label: factorLabels[key] || key,
+    ...(value || {})
+  }))
+})
 
 // 报价（初始化）
 const quote = reactive({
@@ -726,6 +901,69 @@ async function fetchSyncStatus() {
   }
 }
 
+async function loadFinancialDetail(refresh = false) {
+  insightLoading.financial = true
+  insightError.financial = ''
+  try {
+    const res = await stocksApi.getFinancialDetail(code.value, 8, refresh)
+    financialDetail.value = (res as any)?.data || {}
+    loadedInsightTabs.financial = true
+  } catch (error: any) {
+    insightError.financial = error?.message || '详细财报加载失败'
+  } finally {
+    insightLoading.financial = false
+  }
+}
+
+async function loadIndustryComparison(refresh = false) {
+  insightLoading.industry = true
+  insightError.industry = ''
+  try {
+    const res = await stocksApi.getIndustryComparison(code.value, 'latest', refresh)
+    industryComparison.value = (res as any)?.data || {}
+    loadedInsightTabs.industry = true
+  } catch (error: any) {
+    insightError.industry = error?.message || '行业对比加载失败'
+  } finally {
+    insightLoading.industry = false
+  }
+}
+
+async function loadTechnicalFactors(refresh = false) {
+  insightLoading.technical = true
+  insightError.technical = ''
+  try {
+    const res = await stocksApi.getTechnicalFactors(code.value, 120, refresh)
+    technicalFactors.value = (res as any)?.data || {}
+    loadedInsightTabs.technical = true
+  } catch (error: any) {
+    insightError.technical = error?.message || '技术因子加载失败'
+  } finally {
+    insightLoading.technical = false
+  }
+}
+
+async function ensureInsightTabLoaded(tab: StockDetailInsightTab) {
+  if (tab === 'financial' && (!loadedInsightTabs.financial || !financialDetail.value)) await loadFinancialDetail()
+  if (tab === 'industry' && (!loadedInsightTabs.industry || !industryComparison.value)) await loadIndustryComparison()
+  if (tab === 'technical' && (!loadedInsightTabs.technical || !technicalFactors.value)) await loadTechnicalFactors()
+}
+
+async function refreshCurrentInsight() {
+  if (insightTab.value === 'financial') await loadFinancialDetail(true)
+  if (insightTab.value === 'industry') await loadIndustryComparison(true)
+  if (insightTab.value === 'technical') await loadTechnicalFactors(true)
+}
+
+function jumpToInsight(target: StockDetailInsightShortcut) {
+  const destination = targetForInsightShortcut(target)
+  insightTab.value = destination.tab
+  ensureInsightTabLoaded(destination.tab)
+  requestAnimationFrame(() => {
+    document.getElementById(destination.anchor)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
+}
+
 let timer: any = null
 async function checkFavorite() {
   try {
@@ -747,6 +985,7 @@ async function loadPageData() {
     fetchLatestAnalysis(),  // 获取最新的历史分析报告
     fetchSyncStatus()  // 获取同步状态
   ])
+  await ensureInsightTabLoaded(insightTab.value)
 }
 
 function resetPageState() {
@@ -762,6 +1001,16 @@ function resetPageState() {
   analysisProgress.value = 0
   analysisMessage.value = ''
   currentTaskId.value = null
+  insightTab.value = 'financial'
+  financialDetail.value = null
+  industryComparison.value = null
+  technicalFactors.value = null
+  insightError.financial = ''
+  insightError.industry = ''
+  insightError.technical = ''
+  loadedInsightTabs.financial = false
+  loadedInsightTabs.industry = false
+  loadedInsightTabs.technical = false
 }
 
 onMounted(async () => {
@@ -779,6 +1028,10 @@ watch(() => route.params.code, async (newCode, oldCode) => {
 
   resetPageState()
   await loadPageData()
+})
+
+watch(insightTab, (tab) => {
+  ensureInsightTabLoaded(tab)
 })
 
 
@@ -1032,6 +1285,20 @@ function fmtAmount(v: any) {
   if (n >= 1e4) return (n/1e4).toFixed(2) + '万'
   return n.toFixed(0)
 }
+function fmtNumber(v: any) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toFixed(2) : '-'
+}
+function formatFactorValue(row: any) {
+  if (row.latest !== undefined) return fmtNumber(row.latest)
+  if (row.hist !== undefined) return fmtNumber(row.hist)
+  if (row.k !== undefined && row.d !== undefined) return `K ${fmtNumber(row.k)} / D ${fmtNumber(row.d)}`
+  if (row.upper !== undefined && row.middle !== undefined && row.lower !== undefined) {
+    return `${fmtNumber(row.lower)} - ${fmtNumber(row.upper)}`
+  }
+  if (row.ma_5 !== undefined) return fmtNumber(row.ma_5)
+  return '-'
+}
 // 🔥 新增：格式化同步时间（添加时区标识）
 function formatSyncTime(timeStr: string | null | undefined): string {
   if (!timeStr) return '未同步'
@@ -1250,6 +1517,13 @@ function exportReport() {
 .card-hd { display: flex; align-items: center; justify-content: space-between; }
 .k-chart { height: 320px; }
 .legend { margin-top: 8px; font-size: 12px; color: var(--el-text-color-secondary); }
+
+.insights-card { margin-top: 16px; }
+.insight-meta { color: var(--el-text-color-secondary); font-size: 13px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.statement-tabs { margin-top: 12px; }
+.magic-nine-section { margin-bottom: 16px; }
+.magic-nine-section h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.factor-table { margin-top: 12px; }
 
 .news-card .news-list { display: flex; flex-direction: column; }
 .news-item { padding: 10px 12px; border-bottom: 1px solid var(--el-border-color-lighter); transition: background-color .2s ease; }
