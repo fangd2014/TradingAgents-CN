@@ -48,6 +48,13 @@ def _safe_float(value: Any) -> Optional[float]:
     return number
 
 
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _bar_date(bar: Dict[str, Any]) -> str:
     return str(bar.get("trade_date") or bar.get("date") or bar.get("time") or "")
 
@@ -228,16 +235,32 @@ class StockDetailInsightService:
 
         summary = {
             "report_period": latest.get("report_period"),
-            "ann_date": latest.get("ann_date") or latest_income.get("ann_date") or latest_indicator.get("ann_date"),
+            "ann_date": _first_present(
+                latest.get("ann_date"),
+                latest_income.get("ann_date"),
+                latest_indicator.get("ann_date"),
+            ),
             "revenue": latest_income.get("revenue"),
-            "revenue_ttm": latest.get("revenue_ttm") or latest_indicator.get("revenue_ttm"),
-            "net_profit": latest_income.get("n_income") or latest_income.get("net_profit"),
-            "net_profit_ttm": latest.get("net_profit_ttm") or latest_indicator.get("net_profit_ttm"),
+            "revenue_ttm": _first_present(
+                latest.get("revenue_ttm"),
+                latest_indicator.get("revenue_ttm"),
+            ),
+            "net_profit": _first_present(
+                latest_income.get("n_income"),
+                latest_income.get("net_profit"),
+            ),
+            "net_profit_ttm": _first_present(
+                latest.get("net_profit_ttm"),
+                latest_indicator.get("net_profit_ttm"),
+            ),
             "roe": latest_indicator.get("roe"),
             "roa": latest_indicator.get("roa"),
             "gross_margin": latest_indicator.get("grossprofit_margin"),
             "netprofit_margin": latest_indicator.get("netprofit_margin"),
-            "debt_to_assets": latest_indicator.get("debt_to_assets") or latest_balance.get("debt_to_assets"),
+            "debt_to_assets": _first_present(
+                latest_indicator.get("debt_to_assets"),
+                latest_balance.get("debt_to_assets"),
+            ),
             "current_ratio": latest_indicator.get("current_ratio"),
             "quick_ratio": latest_indicator.get("quick_ratio"),
         }

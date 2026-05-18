@@ -145,3 +145,131 @@ async def test_get_financial_detail_unsupported_etf():
 @pytest.mark.parametrize("code", ["200001", "900901", "110031", "400001", "800001"])
 def test_is_a_share_stock_rejects_non_ordinary_a_share(code):
     assert is_a_share_stock(code) is False
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_refresh_success_uses_tushare_source():
+    initial_doc = {
+        "symbol": "688049",
+        "report_period": "20241231",
+        "updated_at": "2026-05-01T00:00:00+08:00",
+        "raw_data": {
+            "income_statement": [{"revenue": 10}],
+            "balance_sheet": [],
+            "cashflow_statement": [],
+            "financial_indicators": [],
+            "main_business": [],
+        },
+    }
+    refreshed_doc = {
+        "symbol": "688049",
+        "report_period": "20251231",
+        "updated_at": "2026-05-18T21:00:00+08:00",
+        "raw_data": {
+            "income_statement": [{"revenue": 999}],
+            "balance_sheet": [],
+            "cashflow_statement": [],
+            "financial_indicators": [],
+            "main_business": [],
+        },
+    }
+    db = FakeDb({"stock_financial_data": FakeCollection([initial_doc])})
+
+    class RefreshSuccessService(StockDetailInsightService):
+        async def _refresh_tushare_financial(self, code6: str, periods: int) -> bool:
+            self.db["stock_financial_data"].docs = [refreshed_doc]
+            return True
+
+        async def _refresh_akshare_financial(self, code6: str) -> bool:
+            return False
+
+    service = RefreshSuccessService(db=db)
+    result = await service.get_financial_detail("688049", refresh=True)
+
+    assert result["status"] == "ok"
+    assert result["source"] == "tushare"
+    assert result["is_cached"] is False
+    assert result["income_statement"][0]["revenue"] == 999
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_refresh_failure_with_cache_returns_warning():
+    cached_doc = {
+        "symbol": "688049",
+        "report_period": "20251231",
+        "updated_at": "2026-05-18T20:00:00+08:00",
+        "raw_data": {
+            "income_statement": [{"revenue": 88}],
+            "balance_sheet": [],
+            "cashflow_statement": [],
+            "financial_indicators": [],
+            "main_business": [],
+        },
+    }
+    db = FakeDb({"stock_financial_data": FakeCollection([cached_doc])})
+
+    class RefreshFailService(StockDetailInsightService):
+        async def _refresh_tushare_financial(self, code6: str, periods: int) -> bool:
+            return False
+
+        async def _refresh_akshare_financial(self, code6: str) -> bool:
+            return False
+
+    service = RefreshFailService(db=db)
+    result = await service.get_financial_detail("688049", refresh=True)
+
+    assert result["status"] == "ok"
+    assert result["source"] == "mongodb"
+    assert result["is_cached"] is True
+    assert "warning" in result
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_refresh_failure_without_cache_returns_empty():
+    db = FakeDb({"stock_financial_data": FakeCollection([])})
+
+    class RefreshFailNoCacheService(StockDetailInsightService):
+        async def _refresh_tushare_financial(self, code6: str, periods: int) -> bool:
+            return False
+
+        async def _refresh_akshare_financial(self, code6: str) -> bool:
+            return False
+
+    service = RefreshFailNoCacheService(db=db)
+    result = await service.get_financial_detail("688049", refresh=True)
+
+    assert result["status"] == "empty"
+    assert result["income_statement"] == []
+    assert result["balance_sheet"] == []
+    assert result["cashflow_statement"] == []
+    assert result["financial_indicators"] == []
+    assert result["main_business"] == []
+    assert result["summary"] == {}
+    assert result["source"] is None
+    assert result["last_updated"] is None
+    assert result["is_cached"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_summary_preserves_zero_values():
+    doc = {
+        "symbol": "688049",
+        "report_period": "20251231",
+        "revenue_ttm": 0,
+        "net_profit_ttm": 0,
+        "updated_at": "2026-05-18T20:00:00+08:00",
+        "raw_data": {
+            "income_statement": [{"n_income": 0}],
+            "balance_sheet": [{"debt_to_assets": 55}],
+            "cashflow_statement": [],
+            "financial_indicators": [{"debt_to_assets": 0}],
+            "main_business": [],
+        },
+    }
+    service = StockDetailInsightService(db=FakeDb({"stock_financial_data": FakeCollection([doc])}))
+    result = await service.get_financial_detail("688049", refresh=False)
+
+    assert result["summary"]["revenue_ttm"] == 0
+    assert result["summary"]["net_profit"] == 0
+    assert result["summary"]["net_profit_ttm"] == 0
+    assert result["summary"]["debt_to_assets"] == 0
