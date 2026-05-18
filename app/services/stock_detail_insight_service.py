@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import math
 import re
+from datetime import datetime, timezone
+from statistics import median
 from typing import Any, Dict, List, Optional
 
 
@@ -188,6 +191,217 @@ class StockDetailInsightService:
             "source": None,
             "last_updated": None,
             "is_cached": False,
+        }
+
+    def _industry_codes(self, industry: str) -> List[str]:
+        raise RuntimeError(f"No synchronous industry code override for industry={industry}")
+
+    async def _stock_basic(self, code6: str) -> Dict[str, Any]:
+        collection = self.db["stock_basic_info"]
+        doc = await collection.find_one({"code": code6}, {"_id": 0})
+        return doc if isinstance(doc, dict) else {}
+
+    async def _industry_codes_async(self, industry: str) -> List[str]:
+        hook = getattr(self, "_industry_codes", None)
+        if callable(hook):
+            try:
+                override_codes = hook(industry)
+                if inspect.isawaitable(override_codes):
+                    override_codes = await override_codes
+                if override_codes:
+                    deduped: List[str] = []
+                    seen = set()
+                    for code in override_codes:
+                        code6 = normalize_code6(code)
+                        if code6 and code6 not in seen:
+                            seen.add(code6)
+                            deduped.append(code6)
+                    return deduped
+            except RuntimeError:
+                pass
+
+        collection = self.db["stock_basic_info"]
+        cursor = collection.find({"industry": industry}, {"_id": 0, "code": 1, "symbol": 1, "ts_code": 1})
+        docs = await cursor.to_list(length=None)
+        docs = docs if isinstance(docs, list) else []
+
+        codes: List[str] = []
+        seen = set()
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            code = normalize_code6(doc.get("code") or doc.get("symbol") or doc.get("ts_code") or "")
+            if code and code not in seen:
+                seen.add(code)
+                codes.append(code)
+        return codes
+
+    async def _financial_docs_for_codes(
+        self,
+        codes: List[str],
+        period: str = "latest",
+    ) -> List[Dict[str, Any]]:
+        normalized_codes = {normalize_code6(code) for code in codes if code}
+        if not normalized_codes:
+            return []
+
+        collection = self.db["stock_financial_data"]
+        cursor = collection.find({"symbol": {"$in": list(normalized_codes)}}, {"_id": 0}).sort("report_period", -1)
+        docs = await cursor.to_list(length=None)
+        docs = docs if isinstance(docs, list) else []
+
+        filtered: List[Dict[str, Any]] = []
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            symbol = normalize_code6(doc.get("symbol") or doc.get("code") or "")
+            if symbol not in normalized_codes:
+                continue
+            report_period = str(doc.get("report_period") or "")
+            if period != "latest" and report_period != str(period):
+                continue
+            doc_copy = dict(doc)
+            doc_copy["_code6"] = symbol
+            filtered.append(doc_copy)
+
+        if period != "latest":
+            filtered.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
+            return filtered
+
+        latest_by_symbol: Dict[str, Dict[str, Any]] = {}
+        for doc in filtered:
+            symbol = doc["_code6"]
+            current_period = str(doc.get("report_period") or "")
+            selected = latest_by_symbol.get(symbol)
+            selected_period = str(selected.get("report_period") or "") if selected else ""
+            if selected is None or current_period > selected_period:
+                latest_by_symbol[symbol] = doc
+
+        latest_docs = list(latest_by_symbol.values())
+        latest_docs.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
+        return latest_docs
+
+    def _metric_value(self, doc: Dict[str, Any], metric: str) -> Optional[float]:
+        aliases = {
+            "pe": ["pe", "pe_ttm"],
+            "pb": ["pb", "pb_mrq"],
+            "ps": ["ps", "ps_ttm"],
+            "roe": ["roe"],
+            "gross_margin": ["gross_margin"],
+            "netprofit_margin": ["netprofit_margin"],
+            "debt_to_assets": ["debt_to_assets", "debt_ratio"],
+            "revenue_growth": ["revenue_yoy", "or_yoy"],
+            "net_profit_growth": ["netprofit_yoy", "profit_dedt_yoy"],
+            "total_mv": ["total_mv"],
+        }
+        for field in aliases.get(metric, [metric]):
+            value = _safe_float(doc.get(field))
+            if value is not None:
+                return value
+        return None
+
+    def _compare_metric(
+        self,
+        metric: str,
+        stock_doc: Dict[str, Any],
+        docs: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        values: List[float] = []
+        for doc in docs:
+            value = self._metric_value(doc, metric)
+            if value is not None:
+                values.append(value)
+
+        stock_value = self._metric_value(stock_doc, metric)
+        if not values:
+            return {
+                "stock_value": stock_value,
+                "industry_median": None,
+                "percentile": None,
+                "rank": None,
+                "sample_count": 0,
+            }
+
+        industry_median = float(median(values))
+        if stock_value is None:
+            rank = None
+            percentile = None
+        else:
+            rank = 1 + sum(1 for value in values if value > stock_value)
+            percentile = round(100.0 * sum(1 for value in values if value <= stock_value) / len(values), 2)
+
+        return {
+            "stock_value": stock_value,
+            "industry_median": industry_median,
+            "percentile": percentile,
+            "rank": rank,
+            "sample_count": len(values),
+        }
+
+    async def get_industry_comparison(
+        self,
+        code: str,
+        period: str = "latest",
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        del refresh  # Reserved for future cache-refresh support.
+        code6 = normalize_code6(code)
+        if not is_a_share_stock(code6):
+            return self._unsupported_response(code6)
+
+        basic_doc = await self._stock_basic(code6)
+        industry = (basic_doc or {}).get("industry")
+        last_updated = datetime.now(timezone.utc).isoformat()
+        if not industry:
+            return {
+                "status": "empty",
+                "code": code6,
+                "industry": None,
+                "period": period,
+                "sample_count": 0,
+                "message": "未找到行业信息",
+                "metrics": {},
+                "source": "mongodb",
+                "last_updated": last_updated,
+                "is_cached": True,
+            }
+
+        industry_codes = await self._industry_codes_async(industry)
+        if code6 not in industry_codes:
+            industry_codes.append(code6)
+        docs = await self._financial_docs_for_codes(industry_codes, period=period)
+        sample_count = len(docs)
+
+        stock_doc: Dict[str, Any] = {}
+        for doc in docs:
+            if normalize_code6(doc.get("symbol") or doc.get("code") or doc.get("_code6") or "") == code6:
+                stock_doc = doc
+                break
+
+        metric_names = [
+            "pe",
+            "pb",
+            "ps",
+            "roe",
+            "gross_margin",
+            "netprofit_margin",
+            "debt_to_assets",
+            "revenue_growth",
+            "net_profit_growth",
+            "total_mv",
+        ]
+        metrics = {metric: self._compare_metric(metric, stock_doc, docs) for metric in metric_names}
+
+        return {
+            "status": "ok" if sample_count >= 3 else "sample_insufficient",
+            "code": code6,
+            "industry": industry,
+            "period": period,
+            "sample_count": sample_count,
+            "metrics": metrics,
+            "source": "mongodb",
+            "last_updated": last_updated,
+            "is_cached": True,
         }
 
     async def _financial_cache(self, code6: str, periods: int) -> List[Dict[str, Any]]:

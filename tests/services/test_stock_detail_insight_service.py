@@ -93,6 +93,15 @@ class FakeCollection:
         self.updated.append((query, update, upsert))
 
 
+class FindOneCollection(FakeCollection):
+    def __init__(self, doc):
+        super().__init__([])
+        self.doc = doc
+
+    async def find_one(self, *_args, **_kwargs):
+        return self.doc
+
+
 class FakeDb(dict):
     def __getitem__(self, name):
         return super().__getitem__(name)
@@ -353,3 +362,51 @@ async def test_get_financial_detail_refresh_tushare_noop_result_returns_cached_w
     assert result["source"] == "mongodb"
     assert result["is_cached"] is True
     assert "warning" in result
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_computes_rank_and_percentile():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "roe": 12, "pb": 2.0, "pe": 20, "total_mv": 100},
+                    {"symbol": "600001", "report_period": "20251231", "roe": 8, "pb": 1.5, "pe": 18, "total_mv": 80},
+                    {"symbol": "600002", "report_period": "20251231", "roe": 16, "pb": 2.5, "pe": 22, "total_mv": 120},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["industry"] == "电气设备"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["roe"]["stock_value"] == 12
+    assert result["metrics"]["roe"]["industry_median"] == 12
+    assert result["metrics"]["roe"]["rank"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_sample_insufficient():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "roe": 12},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "sample_insufficient"
+    assert result["sample_count"] == 1
