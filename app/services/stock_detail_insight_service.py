@@ -287,7 +287,7 @@ class StockDetailInsightService:
             "pb": ["pb", "pb_mrq"],
             "ps": ["ps", "ps_ttm"],
             "roe": ["roe"],
-            "gross_margin": ["gross_margin"],
+            "gross_margin": ["gross_margin", "grossprofit_margin"],
             "netprofit_margin": ["netprofit_margin"],
             "debt_to_assets": ["debt_to_assets", "debt_ratio"],
             "revenue_growth": ["revenue_yoy", "or_yoy"],

@@ -410,3 +410,28 @@ async def test_get_industry_comparison_sample_insufficient():
 
     assert result["status"] == "sample_insufficient"
     assert result["sample_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_gross_margin_uses_grossprofit_margin_alias():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "grossprofit_margin": 35.0},
+                    {"symbol": "600001", "report_period": "20251231", "grossprofit_margin": 30.0},
+                    {"symbol": "600002", "report_period": "20251231", "grossprofit_margin": 40.0},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["metrics"]["gross_margin"]["stock_value"] == 35.0
+    assert result["metrics"]["gross_margin"]["industry_median"] == 35.0
+    assert result["metrics"]["gross_margin"]["rank"] == 2
