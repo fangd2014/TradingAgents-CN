@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stocks", tags=["stocks"])
 
 
+def get_stock_detail_insight_service():
+    from app.services.stock_detail_insight_service import StockDetailInsightService
+
+    return StockDetailInsightService(db=get_mongo_db())
+
+
 def _zfill_code(code: str) -> str:
     try:
         s = str(code).strip()
@@ -61,6 +67,42 @@ def _detect_market_and_code(code: str) -> Tuple[str, str]:
 
     # 默认当作A股处理
     return ('CN', _zfill_code(code))
+
+
+@router.get("/{code}/financial-detail", response_model=dict)
+async def get_financial_detail(
+    code: str,
+    periods: int = Query(8, ge=1, le=20, description="返回最近多少期财报"),
+    refresh: bool = Query(False, description="是否强制刷新外部数据源"),
+    current_user: dict = Depends(get_current_user),
+):
+    service = get_stock_detail_insight_service()
+    data = await service.get_financial_detail(code, periods=periods, refresh=refresh)
+    return ok(data=data)
+
+
+@router.get("/{code}/industry-comparison", response_model=dict)
+async def get_industry_comparison(
+    code: str,
+    period: str = Query("latest", description="报告期，默认latest"),
+    refresh: bool = Query(False, description="是否强制刷新外部数据源"),
+    current_user: dict = Depends(get_current_user),
+):
+    service = get_stock_detail_insight_service()
+    data = await service.get_industry_comparison(code, period=period, refresh=refresh)
+    return ok(data=data)
+
+
+@router.get("/{code}/technical-factors", response_model=dict)
+async def get_technical_factors(
+    code: str,
+    limit: int = Query(120, ge=13, le=300, description="用于计算的日K数量"),
+    refresh: bool = Query(False, description="保留参数，技术因子当前只读本地K线"),
+    current_user: dict = Depends(get_current_user),
+):
+    service = get_stock_detail_insight_service()
+    data = await service.get_technical_factors(code, limit=limit, refresh=refresh)
+    return ok(data=data)
 
 
 @router.get("/{code}/quote", response_model=dict)
