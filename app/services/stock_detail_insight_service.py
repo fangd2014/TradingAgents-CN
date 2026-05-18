@@ -332,7 +332,7 @@ class StockDetailInsightService:
                 values.append(value)
 
         stock_value = self._metric_value(stock_doc, metric)
-        if not values:
+        if stock_value is None or not values:
             return {
                 "stock_value": stock_value,
                 "industry_median": None,
@@ -866,13 +866,14 @@ class StockDetailInsightService:
             return self._unsupported_response(code6)
 
         bars = await self._daily_bars(code6, limit)
-        if len(bars) < 13:
+        usable_bars = [bar for bar in bars if _safe_float(bar.get("close")) is not None]
+        if len(usable_bars) < 13:
             return {
                 "code": code6,
                 "status": "insufficient_data",
                 "message": "本地K线数据不足，请先同步历史行情",
                 "required_bars": 13,
-                "available_bars": len(bars),
+                "available_bars": len(usable_bars),
                 "magic_nine": calculate_magic_nine(bars),
                 "factors": {},
                 "series": [],

@@ -644,6 +644,32 @@ async def test_get_industry_comparison_preserves_zero_metric_stock_value():
 
 
 @pytest.mark.asyncio
+async def test_get_industry_comparison_missing_stock_metric_suppresses_statistics():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "pb": 2.0},
+                    {"symbol": "600001", "report_period": "20251231", "roe": 8},
+                    {"symbol": "600002", "report_period": "20251231", "roe": 16},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["metrics"]["roe"]["stock_value"] is None
+    assert result["metrics"]["roe"]["industry_median"] is None
+    assert result["metrics"]["roe"]["rank"] is None
+    assert result["metrics"]["roe"]["percentile"] is None
+
+
+@pytest.mark.asyncio
 async def test_get_technical_factors_returns_magic_nine_and_core_factors():
     closes = [10, 10, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
     bars = [
@@ -732,6 +758,32 @@ async def test_get_technical_factors_no_kline_data_returns_insufficient_data():
 
     assert result["status"] == "insufficient_data"
     assert result["message"] == "本地K线数据不足，请先同步历史行情"
+
+
+@pytest.mark.asyncio
+async def test_get_technical_factors_unusable_close_values_return_insufficient_data():
+    bars = [
+        {
+            "symbol": "688049",
+            "period": "daily",
+            "trade_date": f"202605{idx + 1:02d}",
+            "open": None,
+            "high": None,
+            "low": None,
+            "close": None,
+            "volume": 1000,
+        }
+        for idx in range(13)
+    ]
+    db = FakeDb({"stock_daily_quotes": FakeCollection(bars)})
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_technical_factors("688049", limit=120)
+
+    assert result["status"] == "insufficient_data"
+    assert result["available_bars"] == 0
+    assert result["factors"] == {}
+    assert result["magic_nine"]["status"] == "insufficient_data"
 
 
 @pytest.mark.asyncio
