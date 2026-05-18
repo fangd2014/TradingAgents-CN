@@ -278,3 +278,78 @@ async def test_get_financial_detail_summary_preserves_zero_values():
     assert result["summary"]["net_profit"] == 0
     assert result["summary"]["net_profit_ttm"] == 0
     assert result["summary"]["debt_to_assets"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_akshare_flattened_cache_summary_only():
+    doc = {
+        "symbol": "688049",
+        "report_period": "20251231",
+        "data_source": "akshare",
+        "updated_at": "2026-05-18T20:00:00+08:00",
+        "revenue": 123.0,
+        "net_income": 45.0,
+        "total_assets": 1000.0,
+        "total_liab": 400.0,
+        "total_equity": 600.0,
+        "cash_and_equivalents": 80.0,
+        "roe": 9.2,
+        "debt_to_assets": 40.0,
+    }
+    service = StockDetailInsightService(db=FakeDb({"stock_financial_data": FakeCollection([doc])}))
+
+    result = await service.get_financial_detail("688049", refresh=False)
+
+    assert result["status"] == "ok"
+    assert result["message"] == "summary_only"
+    assert result["detail_available"] is False
+    assert result["summary"]["revenue"] == 123.0
+    assert result["summary"]["net_income"] == 45.0
+    assert result["summary"]["total_assets"] == 1000.0
+    assert result["summary"]["total_liab"] == 400.0
+    assert result["summary"]["total_equity"] == 600.0
+    assert result["summary"]["cash_and_equivalents"] == 80.0
+    assert result["summary"]["roe"] == 9.2
+    assert result["summary"]["debt_to_assets"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_get_financial_detail_refresh_tushare_noop_result_returns_cached_warning(monkeypatch):
+    import sys
+    import types
+
+    cached_doc = {
+        "symbol": "688049",
+        "report_period": "20251231",
+        "updated_at": "2026-05-18T20:00:00+08:00",
+        "raw_data": {
+            "income_statement": [{"revenue": 88}],
+            "balance_sheet": [],
+            "cashflow_statement": [],
+            "financial_indicators": [],
+            "main_business": [],
+        },
+    }
+    db = FakeDb({"stock_financial_data": FakeCollection([cached_doc])})
+
+    class NoopTushareService(StockDetailInsightService):
+        async def _refresh_akshare_financial(self, code6: str) -> bool:
+            return False
+
+    class FakeTushareSyncService:
+        async def sync_financial_data(self, symbols=None, limit=20):
+            return {"success_count": 0, "error_count": 0}
+
+    async def fake_get_tushare_sync_service():
+        return FakeTushareSyncService()
+
+    fake_module = types.SimpleNamespace(get_tushare_sync_service=fake_get_tushare_sync_service)
+    monkeypatch.setitem(sys.modules, "app.worker.tushare_sync_service", fake_module)
+
+    service = NoopTushareService(db=db)
+    result = await service.get_financial_detail("688049", refresh=True)
+
+    assert result["status"] == "ok"
+    assert result["source"] == "mongodb"
+    assert result["is_cached"] is True
+    assert "warning" in result

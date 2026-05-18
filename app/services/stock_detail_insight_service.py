@@ -230,7 +230,6 @@ class StockDetailInsightService:
         main_business = raw_data.get("main_business") or []
         latest_income = income_statement[0] if income_statement else {}
         latest_balance = balance_sheet[0] if balance_sheet else {}
-        latest_cashflow = cashflow_statement[0] if cashflow_statement else {}
         latest_indicator = financial_indicators[0] if financial_indicators else {}
 
         summary = {
@@ -240,7 +239,10 @@ class StockDetailInsightService:
                 latest_income.get("ann_date"),
                 latest_indicator.get("ann_date"),
             ),
-            "revenue": latest_income.get("revenue"),
+            "revenue": _first_present(
+                latest_income.get("revenue"),
+                latest.get("revenue"),
+            ),
             "revenue_ttm": _first_present(
                 latest.get("revenue_ttm"),
                 latest_indicator.get("revenue_ttm"),
@@ -248,27 +250,64 @@ class StockDetailInsightService:
             "net_profit": _first_present(
                 latest_income.get("n_income"),
                 latest_income.get("net_profit"),
+                latest.get("net_income"),
+                latest.get("net_profit"),
             ),
             "net_profit_ttm": _first_present(
                 latest.get("net_profit_ttm"),
                 latest_indicator.get("net_profit_ttm"),
             ),
-            "roe": latest_indicator.get("roe"),
+            "roe": _first_present(
+                latest_indicator.get("roe"),
+                latest.get("roe"),
+            ),
             "roa": latest_indicator.get("roa"),
             "gross_margin": latest_indicator.get("grossprofit_margin"),
             "netprofit_margin": latest_indicator.get("netprofit_margin"),
             "debt_to_assets": _first_present(
                 latest_indicator.get("debt_to_assets"),
                 latest_balance.get("debt_to_assets"),
+                latest.get("debt_to_assets"),
             ),
             "current_ratio": latest_indicator.get("current_ratio"),
             "quick_ratio": latest_indicator.get("quick_ratio"),
+            "net_income": _first_present(
+                latest.get("net_income"),
+                latest.get("n_income"),
+                latest_income.get("n_income"),
+                latest_income.get("net_profit"),
+            ),
+            "total_assets": _first_present(
+                latest.get("total_assets"),
+                latest_balance.get("total_assets"),
+            ),
+            "total_liab": _first_present(
+                latest.get("total_liab"),
+                latest_balance.get("total_liab"),
+            ),
+            "total_equity": _first_present(
+                latest.get("total_equity"),
+                latest_balance.get("total_equity"),
+            ),
+            "cash_and_equivalents": _first_present(
+                latest.get("cash_and_equivalents"),
+                latest.get("money_cap"),
+            ),
         }
+
+        detail_available = bool(
+            income_statement
+            or balance_sheet
+            or cashflow_statement
+            or financial_indicators
+            or main_business
+        )
+        message = "ok" if detail_available else "summary_only"
 
         return {
             "status": "ok",
             "code": code6,
-            "message": "ok",
+            "message": message,
             "income_statement": income_statement,
             "balance_sheet": balance_sheet,
             "cashflow_statement": cashflow_statement,
@@ -278,6 +317,7 @@ class StockDetailInsightService:
             "source": source,
             "last_updated": latest.get("updated_at"),
             "is_cached": is_cached,
+            "detail_available": detail_available,
         }
 
     async def get_financial_detail(
@@ -330,7 +370,7 @@ class StockDetailInsightService:
 
             service = await get_tushare_sync_service()
             result = await service.sync_financial_data(symbols=[code6], limit=periods)
-            return bool(result and (result.get("success_count", 0) > 0 or result.get("error_count", 0) == 0))
+            return bool(result and result.get("success_count", 0) > 0)
         except Exception:
             return False
 
