@@ -246,7 +246,11 @@ class StockDetailInsightService:
             return []
 
         collection = self.db["stock_financial_data"]
-        cursor = collection.find({"symbol": {"$in": list(normalized_codes)}}, {"_id": 0}).sort("report_period", -1)
+        code_list = list(normalized_codes)
+        cursor = collection.find(
+            {"$or": [{"symbol": {"$in": code_list}}, {"code": {"$in": code_list}}]},
+            {"_id": 0},
+        ).sort("report_period", -1)
         docs = await cursor.to_list(length=None)
         docs = docs if isinstance(docs, list) else []
 
@@ -337,7 +341,7 @@ class StockDetailInsightService:
                 "sample_count": 0,
             }
 
-        if len(values) < 3:
+        if len(values) < 2:
             return {
                 "stock_value": stock_value,
                 "industry_median": None,

@@ -103,6 +103,8 @@ class FakeCollection:
         if not query:
             return True
         for key, expected in query.items():
+            if key == "$or":
+                return any(FakeCollection._matches(doc, item) for item in expected)
             actual = doc.get(key)
             if isinstance(expected, dict):
                 if "$in" in expected:
@@ -456,6 +458,58 @@ async def test_get_industry_comparison_sample_insufficient():
     assert result["metrics"]["roe"]["industry_median"] is None
     assert result["metrics"]["roe"]["rank"] is None
     assert result["metrics"]["roe"]["percentile"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_two_metric_values_computes_statistics():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "roe": 12},
+                    {"symbol": "600001", "report_period": "20251231", "roe": 8},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "sample_insufficient"
+    assert result["sample_count"] == 2
+    assert result["metrics"]["roe"]["stock_value"] == 12
+    assert result["metrics"]["roe"]["industry_median"] == 10
+    assert result["metrics"]["roe"]["rank"] == 1
+    assert result["metrics"]["roe"]["percentile"] == 100
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_reads_code_only_financial_docs():
+    db = FakeDb(
+        {
+            "stock_basic_info": FindOneCollection({"code": "688049", "industry": "电气设备"}),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"code": "688049", "report_period": "20251231", "roe": 12},
+                    {"code": "600001", "report_period": "20251231", "roe": 8},
+                    {"code": "600002", "report_period": "20251231", "roe": 16},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "600001", "600002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["roe"]["stock_value"] == 12
+    assert result["metrics"]["roe"]["industry_median"] == 12
+    assert result["metrics"]["roe"]["rank"] == 2
 
 
 @pytest.mark.asyncio
