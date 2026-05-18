@@ -16,8 +16,24 @@ def is_a_share_stock(code: str) -> bool:
     code6 = normalize_code6(code)
     if not re.fullmatch(r"\d{6}", code6):
         return False
-    excluded_prefixes = ("159", "51", "56", "58")
-    return not code6.startswith(excluded_prefixes)
+    allowed_prefixes = (
+        "000",
+        "001",
+        "002",
+        "003",
+        "300",
+        "301",
+        "600",
+        "601",
+        "603",
+        "605",
+        "688",
+        "689",
+        "920",
+    )
+    if code6.startswith(allowed_prefixes):
+        return True
+    return code6.startswith("8") or code6.startswith("4")
 
 
 def _safe_float(value: Any) -> Optional[float]:

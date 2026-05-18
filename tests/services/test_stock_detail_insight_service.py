@@ -3,6 +3,7 @@ import pytest
 from app.services.stock_detail_insight_service import (
     StockDetailInsightService,
     calculate_magic_nine,
+    is_a_share_stock,
     normalize_code6,
 )
 
@@ -139,3 +140,8 @@ async def test_get_financial_detail_unsupported_etf():
 
     assert result["status"] == "unsupported"
     assert "ETF" in result["message"]
+
+
+@pytest.mark.parametrize("code", ["200001", "900901", "110031"])
+def test_is_a_share_stock_rejects_non_ordinary_a_share(code):
+    assert is_a_share_stock(code) is False
