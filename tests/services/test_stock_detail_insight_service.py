@@ -587,3 +587,119 @@ async def test_get_industry_comparison_preserves_zero_metric_stock_value():
     assert result["metrics"]["roe"]["stock_value"] == 0
     assert result["metrics"]["roe"]["industry_median"] == 3
     assert result["metrics"]["roe"]["rank"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_technical_factors_returns_magic_nine_and_core_factors():
+    closes = [10, 10, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    bars = [
+        {
+            "symbol": "688049",
+            "period": "daily",
+            "trade_date": f"202605{idx + 1:02d}",
+            "open": close - 0.1,
+            "high": close + 0.2,
+            "low": close - 0.2,
+            "close": close,
+            "volume": 1000 + idx,
+            "turnover_rate": 1.5 + idx * 0.01,
+        }
+        for idx, close in enumerate(closes)
+    ]
+    db = FakeDb({"stock_daily_quotes": FakeCollection(bars)})
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_technical_factors("688049", limit=120)
+
+    assert result["status"] == "ok"
+    assert result["source"] == "mongodb"
+    assert result["is_cached"] is True
+    assert result["magic_nine"]["current_direction"] == "up"
+    for key in [
+        "ma_5",
+        "ma_20",
+        "ema_12",
+        "ema_26",
+        "macd",
+        "rsi_14",
+        "boll",
+        "kdj",
+        "atr_14",
+        "volume_ma_5",
+        "turnover_summary",
+    ]:
+        assert key in result["factors"]
+    assert result["factors"]["turnover_summary"]["latest"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_technical_factors_prefers_daily_or_none_period_bars():
+    daily_up = [
+        {
+            "symbol": "688049",
+            "period": "daily",
+            "trade_date": f"202605{idx + 1:02d}",
+            "open": close - 0.1,
+            "high": close + 0.2,
+            "low": close - 0.2,
+            "close": close,
+            "volume": 1000 + idx,
+        }
+        for idx, close in enumerate([10, 10, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
+    ]
+    weekly_down = [
+        {
+            "symbol": "688049",
+            "period": "weekly",
+            "trade_date": f"202605{idx + 1:02d}",
+            "open": close + 0.1,
+            "high": close + 0.2,
+            "low": close - 0.2,
+            "close": close,
+            "volume": 2000 + idx,
+        }
+        for idx, close in enumerate([20, 20, 20, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11])
+    ]
+    db = FakeDb({"stock_daily_quotes": FakeCollection(daily_up + weekly_down)})
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_technical_factors("688049", limit=120)
+
+    assert result["status"] == "ok"
+    assert result["magic_nine"]["current_direction"] == "up"
+
+
+@pytest.mark.asyncio
+async def test_get_technical_factors_no_kline_data_returns_insufficient_data():
+    db = FakeDb({"stock_daily_quotes": FakeCollection([])})
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_technical_factors("688049", limit=120)
+
+    assert result["status"] == "insufficient_data"
+    assert result["message"] == "本地K线数据不足，请先同步历史行情"
+
+
+@pytest.mark.asyncio
+async def test_get_technical_factors_preserves_zero_value_signals():
+    bars = [
+        {
+            "symbol": "688049",
+            "period": None,
+            "trade_date": f"202605{idx + 1:02d}",
+            "open": 0,
+            "high": 0,
+            "low": 0,
+            "close": 0,
+            "volume": 0,
+        }
+        for idx in range(13)
+    ]
+    db = FakeDb({"stock_daily_quotes": FakeCollection(bars)})
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_technical_factors("688049", limit=120)
+
+    assert result["status"] == "ok"
+    assert result["factors"]["ma_5"]["latest"] == 0
+    assert result["factors"]["ma_5"]["signal"] == "多头"

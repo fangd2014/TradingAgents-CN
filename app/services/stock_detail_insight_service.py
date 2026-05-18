@@ -616,6 +616,282 @@ class StockDetailInsightService:
             "is_cached": False,
         }
 
+    async def _daily_bars(self, code6: str, limit: int) -> List[Dict[str, Any]]:
+        collection = self.db["stock_daily_quotes"]
+        safe_limit = max(int(limit or 0), 1)
+
+        cursor = (
+            collection.find({"symbol": code6, "period": {"$in": ["daily", None]}}, {"_id": 0})
+            .sort("trade_date", -1)
+            .limit(safe_limit)
+        )
+        docs = await cursor.to_list(length=None)
+        docs = docs if isinstance(docs, list) else []
+
+        if not docs:
+            cursor = collection.find({"symbol": code6}, {"_id": 0}).sort("trade_date", -1).limit(safe_limit)
+            docs = await cursor.to_list(length=None)
+            docs = docs if isinstance(docs, list) else []
+
+        docs.sort(key=lambda item: _date_sort_key(_bar_date(item)))
+        return docs
+
+    def _factor_signal(self, value: Optional[float], high: float, low: float) -> str:
+        if value is None:
+            return "数据不足"
+        if value >= high:
+            return "偏强"
+        if value <= low:
+            return "偏弱"
+        return "中性"
+
+    def _technical_factor_payload(self, bars: List[Dict[str, Any]]) -> Dict[str, Any]:
+        closes: List[float] = []
+        highs: List[float] = []
+        lows: List[float] = []
+        volumes: List[Optional[float]] = []
+        turnovers: List[Optional[float]] = []
+
+        for bar in bars:
+            close = _safe_float(bar.get("close"))
+            if close is None:
+                continue
+            high = _safe_float(bar.get("high"))
+            low = _safe_float(bar.get("low"))
+            highs.append(high if high is not None else close)
+            lows.append(low if low is not None else close)
+            closes.append(close)
+            volumes.append(_safe_float(_first_present(bar.get("volume"), bar.get("vol"))))
+            turnovers.append(
+                _safe_float(
+                    _first_present(
+                        bar.get("turnover_rate"),
+                        bar.get("turnover"),
+                        bar.get("turnoverratio"),
+                        bar.get("换手率"),
+                    )
+                )
+            )
+
+        if not closes:
+            return {}
+
+        def _sma(values: List[float], window: int) -> Optional[float]:
+            if not values:
+                return None
+            segment = values[-window:]
+            if not segment:
+                return None
+            return sum(segment) / len(segment)
+
+        def _ema_series(values: List[float], span: int) -> List[float]:
+            if not values:
+                return []
+            alpha = 2.0 / (span + 1.0)
+            ema_values: List[float] = [values[0]]
+            for value in values[1:]:
+                ema_values.append(alpha * value + (1.0 - alpha) * ema_values[-1])
+            return ema_values
+
+        latest_close = closes[-1]
+        ma_5 = _sma(closes, 5)
+        ma_20 = _sma(closes, 20)
+
+        ema_12_series = _ema_series(closes, 12)
+        ema_26_series = _ema_series(closes, 26)
+        dif_series = [a - b for a, b in zip(ema_12_series, ema_26_series)]
+        dea_series = _ema_series(dif_series, 9)
+        macd_hist_series = [d - e for d, e in zip(dif_series, dea_series)]
+
+        dif_last = _safe_float(dif_series[-1]) if dif_series else None
+        dea_last = _safe_float(dea_series[-1]) if dea_series else None
+        macd_hist_last = _safe_float(macd_hist_series[-1]) if macd_hist_series else None
+
+        if len(closes) >= 2:
+            deltas = [closes[idx] - closes[idx - 1] for idx in range(1, len(closes))]
+            delta_window = deltas[-14:] if len(deltas) >= 14 else deltas
+            gain_avg = sum(max(delta, 0.0) for delta in delta_window) / len(delta_window) if delta_window else 0.0
+            loss_avg = sum(max(-delta, 0.0) for delta in delta_window) / len(delta_window) if delta_window else 0.0
+            if loss_avg == 0:
+                rsi_14 = 50.0 if gain_avg == 0 else 100.0
+            else:
+                rs = gain_avg / loss_avg
+                rsi_14 = 100.0 - 100.0 / (1.0 + rs)
+        else:
+            rsi_14 = None
+        latest_rsi = _safe_float(rsi_14)
+
+        if ma_20 is None:
+            boll_mid = boll_upper = boll_lower = None
+        else:
+            boll_window = closes[-20:]
+            variance = sum((value - ma_20) ** 2 for value in boll_window) / len(boll_window)
+            std = math.sqrt(variance)
+            boll_mid = ma_20
+            boll_upper = ma_20 + 2.0 * std
+            boll_lower = ma_20 - 2.0 * std
+
+        k_prev = 50.0
+        d_prev = 50.0
+        k_val: Optional[float] = None
+        d_val: Optional[float] = None
+        j_val: Optional[float] = None
+        for idx in range(len(closes)):
+            start = max(0, idx - 8)
+            low_n = min(lows[start : idx + 1])
+            high_n = max(highs[start : idx + 1])
+            denominator = high_n - low_n
+            if denominator == 0:
+                rsv = 50.0
+            else:
+                rsv = (closes[idx] - low_n) / denominator * 100.0
+            k_prev = (2.0 * k_prev + rsv) / 3.0
+            d_prev = (2.0 * d_prev + k_prev) / 3.0
+            j_curr = 3.0 * k_prev - 2.0 * d_prev
+            k_val = k_prev
+            d_val = d_prev
+            j_val = j_curr
+
+        true_ranges: List[float] = []
+        for idx in range(len(closes)):
+            if idx == 0:
+                tr = highs[idx] - lows[idx]
+            else:
+                tr = max(
+                    highs[idx] - lows[idx],
+                    abs(highs[idx] - closes[idx - 1]),
+                    abs(lows[idx] - closes[idx - 1]),
+                )
+            true_ranges.append(abs(tr))
+        atr_window = true_ranges[-14:] if len(true_ranges) >= 14 else true_ranges
+        atr_14 = (sum(atr_window) / len(atr_window)) if atr_window else None
+
+        recent_volumes = [value for value in volumes[-5:] if value is not None]
+        volume_ma_5 = (sum(recent_volumes) / len(recent_volumes)) if recent_volumes else None
+
+        latest_turnover = turnovers[-1] if turnovers else None
+        recent_turnovers = [value for value in turnovers[-5:] if value is not None]
+        turnover_ma_5 = (sum(recent_turnovers) / len(recent_turnovers)) if recent_turnovers else None
+        if latest_turnover is None:
+            turnover_signal = "暂无换手率数据"
+        elif turnover_ma_5 is None:
+            turnover_signal = "参考"
+        elif latest_turnover >= turnover_ma_5:
+            turnover_signal = "活跃度上行"
+        else:
+            turnover_signal = "活跃度回落"
+
+        if ma_5 is None:
+            ma5_signal = "数据不足"
+        else:
+            ma5_signal = "多头" if latest_close >= ma_5 else "空头"
+        if ma_20 is None:
+            ma20_signal = "数据不足"
+        else:
+            ma20_signal = "多头" if latest_close >= ma_20 else "空头"
+
+        if dif_last is None or dea_last is None:
+            macd_signal = "数据不足"
+        elif dif_last >= dea_last:
+            macd_signal = "金叉偏强"
+        else:
+            macd_signal = "死叉偏弱"
+
+        if boll_upper is None or boll_lower is None:
+            boll_signal = "数据不足"
+        elif latest_close > boll_upper:
+            boll_signal = "突破上轨"
+        elif latest_close < boll_lower:
+            boll_signal = "跌破下轨"
+        else:
+            boll_signal = "轨道内"
+
+        latest_k = _safe_float(k_val)
+        latest_d = _safe_float(d_val)
+        latest_j = _safe_float(j_val)
+        if latest_k is None or latest_d is None:
+            kdj_signal = "数据不足"
+        elif latest_k >= latest_d:
+            kdj_signal = "金叉偏强"
+        else:
+            kdj_signal = "死叉偏弱"
+
+        return {
+            "ma_5": {"latest": _safe_float(ma_5), "signal": ma5_signal},
+            "ma_20": {"latest": _safe_float(ma_20), "signal": ma20_signal},
+            "ema_12": {"latest": _safe_float(ema_12_series[-1]) if ema_12_series else None, "signal": "参考"},
+            "ema_26": {"latest": _safe_float(ema_26_series[-1]) if ema_26_series else None, "signal": "参考"},
+            "macd": {
+                "dif": dif_last,
+                "dea": dea_last,
+                "hist": macd_hist_last,
+                "signal": macd_signal,
+            },
+            "rsi_14": {"latest": latest_rsi, "signal": self._factor_signal(latest_rsi, high=70, low=30)},
+            "boll": {
+                "upper": _safe_float(boll_upper),
+                "middle": _safe_float(boll_mid),
+                "lower": _safe_float(boll_lower),
+                "signal": boll_signal,
+            },
+            "kdj": {
+                "k": latest_k,
+                "d": latest_d,
+                "j": latest_j,
+                "signal": kdj_signal,
+            },
+            "atr_14": {"latest": _safe_float(atr_14), "signal": "波动参考"},
+            "volume_ma_5": {"latest": _safe_float(volume_ma_5), "signal": "参考"},
+            "turnover_summary": {
+                "latest": _safe_float(latest_turnover),
+                "ma_5": _safe_float(turnover_ma_5),
+                "signal": turnover_signal,
+            },
+        }
+
+    async def get_technical_factors(
+        self,
+        code: str,
+        limit: int = 120,
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        del refresh  # Technical factors rely on local K-line cache only.
+
+        code6 = normalize_code6(code)
+        if not is_a_share_stock(code6):
+            return self._unsupported_response(code6)
+
+        bars = await self._daily_bars(code6, limit)
+        if len(bars) < 13:
+            return {
+                "code": code6,
+                "status": "insufficient_data",
+                "message": "本地K线数据不足，请先同步历史行情",
+                "required_bars": 13,
+                "available_bars": len(bars),
+                "magic_nine": calculate_magic_nine(bars),
+                "factors": {},
+                "series": [],
+                "source": "mongodb",
+                "last_updated": None,
+                "is_cached": True,
+            }
+
+        return {
+            "code": code6,
+            "status": "ok",
+            "magic_nine": calculate_magic_nine(bars),
+            "factors": self._technical_factor_payload(bars),
+            "series": bars[-60:],
+            "source": "mongodb",
+            "last_updated": _first_present(
+                bars[-1].get("updated_at"),
+                bars[-1].get("trade_date"),
+                bars[-1].get("date"),
+            ),
+            "is_cached": True,
+        }
+
     async def _refresh_tushare_financial(self, code6: str, periods: int) -> bool:
         try:
             from app.worker.tushare_sync_service import get_tushare_sync_service
