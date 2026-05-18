@@ -147,6 +147,11 @@ def test_is_a_share_stock_rejects_non_ordinary_a_share(code):
     assert is_a_share_stock(code) is False
 
 
+@pytest.mark.parametrize("code", ["000001", "002027", "300750", "600519", "688049", "920001"])
+def test_is_a_share_stock_accepts_supported_ordinary_a_share(code):
+    assert is_a_share_stock(code) is True
+
+
 @pytest.mark.asyncio
 async def test_get_financial_detail_refresh_success_uses_tushare_source():
     initial_doc = {
