@@ -22,7 +22,12 @@ init_logging()
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
-from app.services.simple_analysis_service import create_analysis_config, get_provider_by_model_name
+from app.services.simple_analysis_service import (
+    create_analysis_config,
+    extract_role_models_from_parameters,
+    get_model_config_map_sync,
+    get_provider_by_model_name,
+)
 from app.models.analysis import (
     AnalysisParameters, AnalysisResult, AnalysisTask, AnalysisBatch,
     AnalysisStatus, BatchStatus, SingleAnalysisRequest, BatchAnalysisRequest
@@ -174,6 +179,8 @@ class AnalysisService:
 
             # 参数配置
             progress_tracker.update_progress("⚙️ 配置分析参数")
+            role_models = extract_role_models_from_parameters(task.parameters)
+            role_model_configs = get_model_config_map_sync(list(role_models.values()))
 
             # 使用标准配置函数创建完整配置
             from app.services.simple_analysis_service import create_analysis_config
@@ -185,7 +192,9 @@ class AnalysisService:
                 llm_provider=llm_provider,
                 market_type=getattr(task.parameters, 'market_type', "A股"),
                 quick_model_config=quick_model_config,  # 传递模型配置
-                deep_model_config=deep_model_config     # 传递模型配置
+                deep_model_config=deep_model_config,    # 传递模型配置
+                role_models=role_models,
+                role_model_configs=role_model_configs
             )
 
             # 启动引擎
@@ -298,6 +307,8 @@ class AnalysisService:
             from tradingagents.llm_clients.provider_keys import normalize_provider_key
 
             llm_provider = normalize_provider_key(get_provider_by_model_name(quick_model))
+            role_models = extract_role_models_from_parameters(task.parameters)
+            role_model_configs = get_model_config_map_sync(list(role_models.values()))
 
             # 使用标准配置函数创建完整配置
             from app.services.simple_analysis_service import create_analysis_config
@@ -309,7 +320,9 @@ class AnalysisService:
                 llm_provider=llm_provider,
                 market_type=getattr(task.parameters, 'market_type', "A股"),
                 quick_model_config=quick_model_config,  # 传递模型配置
-                deep_model_config=deep_model_config     # 传递模型配置
+                deep_model_config=deep_model_config,    # 传递模型配置
+                role_models=role_models,
+                role_model_configs=role_model_configs
             )
 
             # 获取TradingAgents实例
@@ -666,6 +679,8 @@ class AnalysisService:
             from tradingagents.llm_clients.provider_keys import normalize_provider_key
 
             llm_provider = normalize_provider_key(await get_provider_by_model_name(quick_model))
+            role_models = extract_role_models_from_parameters(task.parameters)
+            role_model_configs = get_model_config_map_sync(list(role_models.values()))
 
             # 使用标准配置函数创建完整配置
             config = create_analysis_config(
@@ -676,7 +691,9 @@ class AnalysisService:
                 llm_provider=llm_provider,
                 market_type=getattr(task.parameters, 'market_type', "A股"),
                 quick_model_config=quick_model_config,  # 传递模型配置
-                deep_model_config=deep_model_config     # 传递模型配置
+                deep_model_config=deep_model_config,    # 传递模型配置
+                role_models=role_models,
+                role_model_configs=role_model_configs
             )
             
             if progress_callback:

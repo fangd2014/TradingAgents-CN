@@ -693,18 +693,18 @@ class Toolkit:
     @tool
     @log_tool_call(tool_name="get_stock_fundamentals_unified", log_args=True)
     def get_stock_fundamentals_unified(
-        ticker: Annotated[str, "股票代码（支持A股、港股、美股）"],
+        ticker: Annotated[str, "股票代码（支持A股、A股ETF、港股、美股）"],
         start_date: Annotated[str, "开始日期，格式：YYYY-MM-DD"] = None,
         end_date: Annotated[str, "结束日期，格式：YYYY-MM-DD"] = None,
         curr_date: Annotated[str, "当前日期，格式：YYYY-MM-DD"] = None
     ) -> str:
         """
         统一的股票基本面分析工具
-        自动识别股票类型（A股、港股、美股）并调用相应的数据源
+        自动识别股票类型（A股、A股ETF、港股、美股）并调用相应的数据源
         支持基于分析级别的数据获取策略
 
         Args:
-            ticker: 股票代码（如：000001、0700.HK、AAPL）
+            ticker: 股票代码（如：000001、510300、0700.HK、AAPL）
             start_date: 开始日期（可选，格式：YYYY-MM-DD）
             end_date: 结束日期（可选，格式：YYYY-MM-DD）
             curr_date: 当前日期（可选，格式：YYYY-MM-DD）
@@ -800,6 +800,7 @@ class Toolkit:
             # 自动识别股票类型
             market_info = StockUtils.get_market_info(ticker)
             is_china = market_info['is_china']
+            is_china_etf = market_info.get('is_china_etf', False)
             is_hk = market_info['is_hk']
             is_us = market_info['is_us']
 
@@ -850,7 +851,22 @@ class Toolkit:
 
             result_data = []
 
-            if is_china:
+            if is_china_etf:
+                # A股ETF：使用基金专用数据，避免套用上市公司财报逻辑
+                logger.info(f"🇨🇳 [统一基本面工具] 处理A股ETF数据，ticker: '{ticker}'")
+
+                try:
+                    from tradingagents.dataflows.providers.china.etf import get_china_etf_fundamentals_data
+
+                    etf_data = get_china_etf_fundamentals_data(ticker, curr_date)
+                    logger.info(f"🔍 [基本面工具调试] A股ETF基本面数据返回长度: {len(etf_data)}")
+                    logger.info(f"🔍 [基本面工具调试] A股ETF基本面数据前500字符:\n{etf_data[:500]}")
+                    result_data.append(f"## A股ETF基本面数据\n{etf_data}")
+                except Exception as e:
+                    logger.error(f"❌ [基本面工具调试] A股ETF基本面数据获取失败: {e}")
+                    result_data.append(f"## A股ETF基本面数据\n获取失败: {e}")
+
+            elif is_china:
                 # 中国A股：基本面分析优化策略 - 只获取必要的当前价格和基本面数据
                 logger.info(f"🇨🇳 [统一基本面工具] 处理A股数据，数据深度: {data_depth}...")
                 logger.info(f"🔍 [股票代码追踪] 进入A股处理分支，ticker: '{ticker}'")
@@ -895,6 +911,18 @@ class Toolkit:
                 except Exception as e:
                     logger.error(f"❌ [基本面工具调试] A股基本面数据获取失败: {e}")
                     result_data.append(f"## A股基本面财务数据\n获取失败: {e}")
+
+                try:
+                    from tradingagents.dataflows.analysis_detail_data import get_stock_fundamental_detail_context
+
+                    detail_context = get_stock_fundamental_detail_context(ticker)
+                    if detail_context:
+                        logger.info(f"✅ [统一基本面工具] 已接入股票详情深度数据，长度: {len(detail_context)}")
+                        result_data.append(detail_context)
+                    else:
+                        logger.info("ℹ️ [统一基本面工具] 股票详情深度数据为空，跳过")
+                except Exception as e:
+                    logger.warning(f"⚠️ [统一基本面工具] 股票详情深度数据接入失败: {e}")
 
             elif is_hk:
                 # 港股：使用AKShare数据源，支持多重备用方案
@@ -1042,19 +1070,19 @@ class Toolkit:
     @tool
     @log_tool_call(tool_name="get_stock_market_data_unified", log_args=True)
     def get_stock_market_data_unified(
-        ticker: Annotated[str, "股票代码（支持A股、港股、美股）"],
+        ticker: Annotated[str, "股票代码（支持A股、A股ETF、港股、美股）"],
         start_date: Annotated[str, "开始日期，格式：YYYY-MM-DD。注意：系统会自动扩展到配置的回溯天数（通常为365天），你只需要传递分析日期即可"],
         end_date: Annotated[str, "结束日期，格式：YYYY-MM-DD。通常与start_date相同，传递当前分析日期即可"]
     ) -> str:
         """
         统一的股票市场数据工具
-        自动识别股票类型（A股、港股、美股）并调用相应的数据源获取价格和技术指标数据
+        自动识别股票类型（A股、A股ETF、港股、美股）并调用相应的数据源获取价格和技术指标数据
 
         ⚠️ 重要：系统会自动扩展日期范围到配置的回溯天数（通常为365天），以确保技术指标计算有足够的历史数据。
         你只需要传递当前分析日期作为 start_date 和 end_date 即可，无需手动计算历史日期范围。
 
         Args:
-            ticker: 股票代码（如：000001、0700.HK、AAPL）
+            ticker: 股票代码（如：000001、510300、0700.HK、AAPL）
             start_date: 开始日期（格式：YYYY-MM-DD）。传递当前分析日期即可，系统会自动扩展
             end_date: 结束日期（格式：YYYY-MM-DD）。传递当前分析日期即可
 
@@ -1076,6 +1104,7 @@ class Toolkit:
             # 自动识别股票类型
             market_info = StockUtils.get_market_info(ticker)
             is_china = market_info['is_china']
+            is_china_etf = market_info.get('is_china_etf', False)
             is_hk = market_info['is_hk']
             is_us = market_info['is_us']
 
@@ -1084,7 +1113,22 @@ class Toolkit:
 
             result_data = []
 
-            if is_china:
+            if is_china_etf:
+                # A股ETF：使用基金专用行情接口
+                logger.info(f"🇨🇳 [统一市场工具] 处理A股ETF市场数据...")
+
+                try:
+                    from tradingagents.dataflows.providers.china.etf import get_china_etf_market_data
+
+                    etf_data = get_china_etf_market_data(ticker, start_date, end_date)
+                    logger.info(f"🔍 [市场工具调试] A股ETF数据返回长度: {len(etf_data)}")
+                    logger.info(f"🔍 [市场工具调试] A股ETF数据前500字符:\n{etf_data[:500]}")
+                    result_data.append(f"## A股ETF市场数据\n{etf_data}")
+                except Exception as e:
+                    logger.error(f"❌ [市场工具调试] A股ETF数据获取失败: {e}")
+                    result_data.append(f"## A股ETF市场数据\n获取失败: {e}")
+
+            elif is_china:
                 # 中国A股：使用中国股票数据源
                 logger.info(f"🇨🇳 [统一市场工具] 处理A股市场数据...")
 
@@ -1097,6 +1141,36 @@ class Toolkit:
                     logger.info(f"🔍 [市场工具调试] A股数据前500字符:\n{stock_data[:500]}")
 
                     result_data.append(f"## A股市场数据\n{stock_data}")
+
+                    try:
+                        from datetime import datetime, timedelta
+
+                        from tradingagents.dataflows.data_source_manager import get_data_source_manager
+                        from tradingagents.tools.analysis.indicators import format_chip_peak_report
+
+                        chip_end_date = end_date or start_date
+                        chip_start_date = (
+                            datetime.strptime(chip_end_date, "%Y-%m-%d") - timedelta(days=365)
+                        ).strftime("%Y-%m-%d")
+                        manager = get_data_source_manager()
+                        chip_df = manager.get_stock_dataframe(ticker, chip_start_date, chip_end_date)
+                        chip_report = format_chip_peak_report(chip_df)
+                        result_data.append(chip_report)
+                    except Exception as chip_error:
+                        logger.warning(f"⚠️ [筹码峰分析] 计算失败: {chip_error}")
+                        result_data.append(f"## 🧩 筹码峰分析\n- 暂不可用：{chip_error}\n")
+
+                    try:
+                        from tradingagents.dataflows.analysis_detail_data import get_stock_technical_detail_context
+
+                        technical_context = get_stock_technical_detail_context(ticker)
+                        if technical_context:
+                            logger.info(f"✅ [统一市场工具] 已接入股票详情技术因子数据，长度: {len(technical_context)}")
+                            result_data.append(technical_context)
+                        else:
+                            logger.info("ℹ️ [统一市场工具] 股票详情技术因子数据为空，跳过")
+                    except Exception as technical_error:
+                        logger.warning(f"⚠️ [统一市场工具] 股票详情技术因子数据接入失败: {technical_error}")
                 except Exception as e:
                     logger.error(f"❌ [市场工具调试] A股数据获取失败: {e}")
                     result_data.append(f"## A股市场数据\n获取失败: {e}")
@@ -1317,34 +1391,36 @@ class Toolkit:
 
             result_data = []
 
-            if is_china or is_hk:
-                # 中国A股和港股：使用社交媒体情绪分析
-                logger.info(f"🇨🇳🇭🇰 [统一情绪工具] 处理中文市场情绪...")
+            if is_china:
+                # 中国A股：尝试从同花顺、东方财富、雪球获取投资社区情绪
+                logger.info(f"🇨🇳 [统一情绪工具] 处理A股投资社区情绪...")
 
                 try:
-                    # 可以集成微博、雪球、东方财富等中文社交媒体情绪
-                    # 目前使用基础的情绪分析
-                    sentiment_summary = f"""
-## 中文市场情绪分析
+                    from tradingagents.dataflows.news.chinese_finance import get_chinese_social_sentiment
+
+                    sentiment_summary = get_chinese_social_sentiment(ticker, curr_date)
+                    result_data.append(sentiment_summary)
+                except Exception as e:
+                    result_data.append(f"## 中文市场情绪\n获取失败: {e}")
+
+            elif is_hk:
+                logger.info(f"🇭🇰 [统一情绪工具] 港股中文社媒情绪暂未接入专用数据源...")
+                result_data.append(f"""
+## 港股市场情绪分析
 
 **股票**: {ticker} ({market_info['market_name']})
 **分析日期**: {curr_date}
 
-### 市场情绪概况
-- 由于中文社交媒体情绪数据源暂未完全集成，当前提供基础分析
-- 建议关注雪球、东方财富、同花顺等平台的讨论热度
-- 港股市场还需关注香港本地财经媒体情绪
+### 数据源状态
+- A股投资社区情绪源（同花顺、东方财富、雪球）不适用于港股代码
+- 港股专用社交媒体/论坛情绪数据源暂未接入
+- 建议结合港股新闻、公告、成交活跃度和香港本地财经媒体观点分析
 
 ### 情绪指标
 - 整体情绪: 中性
-- 讨论热度: 待分析
+- 讨论热度: 待接入港股专用数据源
 - 投资者信心: 待评估
-
-*注：完整的中文社交媒体情绪分析功能正在开发中*
-"""
-                    result_data.append(sentiment_summary)
-                except Exception as e:
-                    result_data.append(f"## 中文市场情绪\n获取失败: {e}")
+""")
 
             else:
                 # 美股：使用Reddit情绪分析

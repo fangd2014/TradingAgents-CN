@@ -26,6 +26,7 @@ services:
       PYTHONUNBUFFERED: 1
       PYTHONDONTWRITEBYTECODE: 1
       TZ: "Asia/Shanghai"
+      DEBUG: "false"
       # 日志配置
       TRADINGAGENTS_LOG_LEVEL: "INFO"
       TRADINGAGENTS_LOG_DIR: "/app/logs"
@@ -34,6 +35,22 @@ services:
       TRADINGAGENTS_MONGODB_URL: mongodb://admin:tradingagents123@mongodb:27017/tradingagents?authSource=admin
       TRADINGAGENTS_REDIS_URL: redis://:tradingagents123@redis:6379
       TRADINGAGENTS_CACHE_TYPE: redis
+      MONGODB_ENABLED: "true"
+      MONGODB_HOST: "mongodb"
+      MONGODB_PORT: "27017"
+      MONGODB_USERNAME: "admin"
+      MONGODB_PASSWORD: "tradingagents123"
+      MONGODB_DATABASE: "tradingagentscn"
+      MONGODB_DATABASE_SCOPE: "explicit"
+      MONGODB_AUTH_SOURCE: "admin"
+      MONGODB_CONNECTION_STRING: "mongodb://admin:tradingagents123@mongodb:27017/tradingagentscn?authSource=admin"
+      MONGODB_DATABASE_NAME: "tradingagentscn"
+      USE_MONGODB_STORAGE: "true"
+      REDIS_ENABLED: "true"
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: "tradingagents123"
+      REDIS_DB: "0"
       # Docker环境标识
       DOCKER_CONTAINER: "true"
       # API配置
@@ -80,7 +97,7 @@ services:
     networks:
       - tradingagents-network
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -205,4 +222,3 @@ networks:
   tradingagents-network:
     driver: bridge
     name: tradingagents-network
-

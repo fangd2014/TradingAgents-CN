@@ -18,6 +18,7 @@ export interface StockValidationResult {
  * - 00xxxx: 深圳主板
  * - 30xxxx: 创业板
  * - 43xxxx/83xxxx/87xxxx: 北交所
+ * - 51xxxx/56xxxx/58xxxx/159xxx: A股场内ETF
  */
 export function validateAStock(code: string): StockValidationResult {
   // 移除空格和特殊字符
@@ -33,12 +34,13 @@ export function validateAStock(code: string): StockValidationResult {
   
   // 验证前缀
   const prefix = cleanCode.substring(0, 2)
-  const validPrefixes = ['60', '68', '00', '30', '43', '83', '87']
-  
-  if (!validPrefixes.includes(prefix)) {
+  const validPrefixes = ['60', '68', '00', '30', '43', '83', '87', '51', '56', '58']
+  const validThreeDigitPrefixes = ['159']
+
+  if (!validPrefixes.includes(prefix) && !validThreeDigitPrefixes.includes(cleanCode.substring(0, 3))) {
     return {
       valid: false,
-      message: 'A股代码前缀不正确（支持：60/68/00/30/43/83/87开头）'
+      message: 'A股代码前缀不正确（支持股票：60/68/00/30/43/83/87，ETF：51/56/58/159开头）'
     }
   }
   
@@ -178,7 +180,7 @@ export function validateStockCode(
 export function getStockCodeFormatHelp(market: 'A股' | '美股' | '港股'): string {
   switch (market) {
     case 'A股':
-      return '6位数字，如：000001（平安银行）、600519（贵州茅台）'
+      return '6位数字，如：000001（平安银行）、600519（贵州茅台）、510300（沪深300ETF）'
     case '美股':
       return '1-5个字母，如：AAPL（苹果）、TSLA（特斯拉）'
     case '港股':
@@ -194,7 +196,7 @@ export function getStockCodeFormatHelp(market: 'A股' | '美股' | '港股'): st
 export function getStockCodeExamples(market: 'A股' | '美股' | '港股'): string[] {
   switch (market) {
     case 'A股':
-      return ['000001', '600519', '000858', '300750']
+      return ['000001', '600519', '000858', '300750', '510300']
     case '美股':
       return ['AAPL', 'MSFT', 'GOOGL', 'TSLA']
     case '港股':
@@ -213,4 +215,3 @@ export function formatStockCode(code: string, market: 'A股' | '美股' | '港�
   const validation = validateStockCode(code, market)
   return validation.normalizedCode || code
 }
-

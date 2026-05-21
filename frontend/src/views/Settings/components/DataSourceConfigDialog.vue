@@ -110,6 +110,19 @@
         </div>
       </el-form-item>
 
+      <el-form-item v-if="isTushareSource" label="TUSHARE_WEB_COOKIE">
+        <el-input
+          v-model="formData.config_params.TUSHARE_WEB_COOKIE"
+          type="textarea"
+          :rows="3"
+          placeholder="TUSHARE_WEB_COOKIE（可选，留空则保留已保存值或使用环境变量）"
+          clearable
+        />
+        <div class="form-tip">
+          用于 tushare.pro/news 网页新闻爬虫降级；从浏览器请求头复制 Cookie
+        </div>
+      </el-form-item>
+
       <!-- API Secret 输入框（某些数据源需要） -->
       <el-form-item v-if="needsApiSecret" label="API Secret" prop="api_secret">
         <el-input
@@ -201,18 +214,18 @@
       <el-form-item label="自定义参数">
         <div class="config-params">
           <div
-            v-for="(_value, key, index) in formData.config_params"
-            :key="index"
+            v-for="param in visibleConfigParamEntries"
+            :key="param.key"
             class="param-item"
           >
             <el-input
-              v-model="paramKeys[index]"
+              v-model="paramKeys[param.index]"
               placeholder="参数名"
               style="width: 40%"
-              @blur="updateParamKey(index, paramKeys[index])"
+              @blur="updateParamKey(param.key, param.index)"
             />
             <el-input
-              v-model="formData.config_params[key]"
+              v-model="formData.config_params[param.key]"
               placeholder="参数值"
               style="width: 40%; margin-left: 8px"
             />
@@ -221,7 +234,7 @@
               size="small"
               icon="Delete"
               style="margin-left: 8px"
-              @click="removeParam(key)"
+              @click="removeParam(param.key)"
             />
           </div>
           <el-button
@@ -298,6 +311,16 @@ const needsApiSecret = computed(() => {
   return ['alpha_vantage', 'wind', 'choice'].includes(type)
 })
 
+const isTushareSource = computed(() => {
+  return (formData.value.type || '').toLowerCase() === 'tushare'
+})
+
+const visibleConfigParamEntries = computed(() => {
+  return paramKeys.value
+    .map((key, index) => ({ key, index }))
+    .filter(param => param.key !== 'TUSHARE_WEB_COOKIE')
+})
+
 // 当前选中的数据源信息
 const currentDataSourceInfo = computed(() => {
   if (!formData.value.type) return null
@@ -315,6 +338,7 @@ const openRegisterUrl = () => {
 const handleTypeChange = () => {
   const selectedType = formData.value.type
   console.log('数据源类型已变更:', selectedType)
+  ensureConfigParams()
 
   // 🔥 自动填充数据源名称（使用数据源类型的值）
   if (selectedType) {
@@ -350,6 +374,16 @@ const defaultFormData = {
 
 const formData = ref({ ...defaultFormData })
 const paramKeys = ref<string[]>([])
+
+const ensureConfigParams = () => {
+  if (!formData.value.config_params) {
+    formData.value.config_params = {}
+  }
+  if (isTushareSource.value && formData.value.config_params.TUSHARE_WEB_COOKIE === undefined) {
+    formData.value.config_params.TUSHARE_WEB_COOKIE = ''
+  }
+  paramKeys.value = Object.keys(formData.value.config_params || {})
+}
 
 /**
  * 数据源类型选项
@@ -489,8 +523,10 @@ const removeParam = (key: string) => {
   }
 }
 
-const updateParamKey = (index: number, newKey: string) => {
-  const oldKey = paramKeys.value[index]
+const updateParamKey = (oldKey: string, index: number) => {
+  if (index < 0) return
+
+  const newKey = paramKeys.value[index]
   if (oldKey !== newKey && newKey.trim()) {
     const value = formData.value.config_params[oldKey]
     delete formData.value.config_params[oldKey]
@@ -518,13 +554,15 @@ watch(
       formData.value = {
         ...defaultFormData,
         ...config,
+        config_params: { ...(config.config_params || {}) },
         market_categories: config.market_categories || []
       }
+      ensureConfigParams()
       // 初始化参数键列表
-      paramKeys.value = Object.keys(config.config_params || {})
+      paramKeys.value = Object.keys(formData.value.config_params || {})
     } else {
       // 新增模式：使用默认值
-      formData.value = { ...defaultFormData }
+      formData.value = { ...defaultFormData, config_params: {}, market_categories: [] }
       paramKeys.value = []
     }
   },
@@ -542,12 +580,14 @@ watch(
         formData.value = {
           ...defaultFormData,
           ...props.config,
+          config_params: { ...(props.config.config_params || {}) },
           market_categories: props.config.market_categories || []
         }
-        paramKeys.value = Object.keys(props.config.config_params || {})
+        ensureConfigParams()
+        paramKeys.value = Object.keys(formData.value.config_params || {})
       } else {
         // 新增模式
-        formData.value = { ...defaultFormData }
+        formData.value = { ...defaultFormData, config_params: {}, market_categories: [] }
         paramKeys.value = []
       }
     }
@@ -569,7 +609,11 @@ const handleSubmit = async () => {
 
     // 🔥 修复：直接发送截断的 API Key 给后端
     // 后端会判断截断值是否与数据库中的原值匹配
-    const payload: any = { ...formData.value }
+    ensureConfigParams()
+    const payload: any = {
+      ...formData.value,
+      config_params: { ...(formData.value.config_params || {}) }
+    }
 
     // 添加日志，显示发送的 API Key
     if (payload.api_key) {
@@ -649,7 +693,11 @@ const handleTest = async () => {
 
     // 🔥 修复：直接发送截断的 API Key 给后端
     // 后端会判断截断值是否与数据库中的原值匹配
-    const testPayload: any = { ...formData.value }
+    ensureConfigParams()
+    const testPayload: any = {
+      ...formData.value,
+      config_params: { ...(formData.value.config_params || {}) }
+    }
 
     // 添加日志，显示发送的 API Key
     if (testPayload.api_key) {

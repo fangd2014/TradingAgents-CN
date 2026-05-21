@@ -191,6 +191,68 @@ class StockDataPreparer:
         ]
         return "\n".join(suggestions)
 
+    def _prepare_china_etf_data(
+        self,
+        stock_code: str,
+        period_days: int,
+        analysis_date: str,
+    ) -> StockDataPreparationResult:
+        """预获取A股ETF数据，避免套用普通A股历史行情校验。"""
+        logger.info(f"📊 [A股ETF数据] 开始准备{stock_code}的数据 (时长: {period_days}天)")
+
+        try:
+            end_date = datetime.strptime(analysis_date, '%Y-%m-%d')
+        except ValueError:
+            end_date = datetime.now()
+
+        start_date = end_date - timedelta(days=max(period_days, 30))
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        end_date_str = end_date.strftime('%Y-%m-%d')
+
+        try:
+            from tradingagents.dataflows.providers.china.etf import (
+                get_china_etf_history_dataframe,
+                get_china_etf_lightweight_spot_row,
+            )
+
+            history = get_china_etf_history_dataframe(stock_code, start_date_str, end_date_str)
+            if history is None or history.empty:
+                return StockDataPreparationResult(
+                    is_valid=False,
+                    stock_code=stock_code,
+                    market_type="A股ETF",
+                    error_message=f"无法获取ETF {stock_code} 的历史行情数据",
+                    suggestion="请检查ETF代码是否正确，或稍后重试"
+                )
+
+            stock_name = f"ETF {stock_code}"
+            spot_row = get_china_etf_lightweight_spot_row(stock_code)
+            if spot_row is not None:
+                for column in ("名称", "基金名称", "基金简称"):
+                    if column in spot_row.index and str(spot_row[column]).strip():
+                        stock_name = str(spot_row[column]).strip()
+                        break
+
+            return StockDataPreparationResult(
+                is_valid=True,
+                stock_code=stock_code,
+                market_type="A股ETF",
+                stock_name=stock_name,
+                has_historical_data=True,
+                has_basic_info=True,
+                data_period_days=len(history),
+                cache_status=f"ETF历史行情已获取({len(history)}条); ETF基础信息已获取"
+            )
+        except Exception as e:
+            logger.error(f"❌ [A股ETF数据] 数据准备失败: {e}")
+            return StockDataPreparationResult(
+                is_valid=False,
+                stock_code=stock_code,
+                market_type="A股ETF",
+                error_message=f"ETF {stock_code} 数据准备过程中发生错误: {str(e)}",
+                suggestion="请检查网络连接或ETF数据源配置，或稍后重试"
+            )
+
     def _extract_hk_stock_name(self, stock_info, stock_code: str) -> str:
         """从港股信息中提取股票名称，支持多种格式"""
         if not stock_info:
@@ -323,6 +385,10 @@ class StockDataPreparer:
                                  analysis_date: str) -> StockDataPreparationResult:
         """预获取A股数据，包含数据库检查和自动同步"""
         logger.info(f"📊 [A股数据] 开始准备{stock_code}的数据 (时长: {period_days}天)")
+
+        from tradingagents.utils.stock_utils import StockUtils
+        if StockUtils.is_china_etf(stock_code):
+            return self._prepare_china_etf_data(stock_code, period_days, analysis_date)
 
         # 计算日期范围（使用扩展后的日期范围，与get_china_stock_data_unified保持一致）
         end_date = datetime.strptime(analysis_date, '%Y-%m-%d')
@@ -485,6 +551,10 @@ class StockDataPreparer:
                                              analysis_date: str) -> StockDataPreparationResult:
         """预获取A股数据（异步版本），包含数据库检查和自动同步"""
         logger.info(f"📊 [A股数据-异步] 开始准备{stock_code}的数据 (时长: {period_days}天)")
+
+        from tradingagents.utils.stock_utils import StockUtils
+        if StockUtils.is_china_etf(stock_code):
+            return self._prepare_china_etf_data(stock_code, period_days, analysis_date)
 
         # 计算日期范围
         end_date = datetime.strptime(analysis_date, '%Y-%m-%d')

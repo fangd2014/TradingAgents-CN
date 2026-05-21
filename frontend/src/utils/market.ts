@@ -4,7 +4,7 @@ export const normalizeMarketForAnalysis = (market: any): string => {
   const upper = raw.toUpperCase()
   const cn = raw
   const isA = [
-    'A股', '主板', '创业板', '科创板', '中小板', '沪市', '深市', '上交所', '深交所', '北交所'
+    'A股', 'A股ETF', 'ETF', '主板', '创业板', '科创板', '中小板', '沪市', '深市', '上交所', '深交所', '北交所'
   ].includes(cn) || ['CN', 'SH', 'SZ', 'SSE', 'SZSE'].includes(upper)
   const isHK = ['港股', '港交所'].includes(cn) || ['HK', 'HKEX'].includes(upper)
   const isUS = ['美股', '纳斯达克', '纽交所'].includes(cn) || ['US', 'NASDAQ', 'NYSE', 'AMEX'].includes(upper)
@@ -80,4 +80,3 @@ export default {
   exchangeCodeToMarket,
   getMarketByStockCode
 }
-

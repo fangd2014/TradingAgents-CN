@@ -51,6 +51,12 @@ class AnalysisParameters(BaseModel):
     # 模型配置
     quick_analysis_model: Optional[str] = "qwen-turbo"
     deep_analysis_model: Optional[str] = "qwen-max"
+    positive_side_model: Optional[str] = None
+    negative_side_model: Optional[str] = None
+    bull_researcher_model: Optional[str] = None
+    bear_researcher_model: Optional[str] = None
+    risky_analyst_model: Optional[str] = None
+    safe_analyst_model: Optional[str] = None
 
 
 class AnalysisResult(BaseModel):
@@ -155,6 +161,7 @@ class SingleAnalysisRequest(BaseModel):
     """单股分析请求"""
     symbol: Optional[str] = Field(None, description="6位股票代码")
     stock_code: Optional[str] = Field(None, description="股票代码(已废弃,使用symbol)")
+    stock_name: Optional[str] = Field(None, description="股票名称")
     parameters: Optional[AnalysisParameters] = None
 
     def get_symbol(self) -> str:

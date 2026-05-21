@@ -133,6 +133,12 @@ class FakeCollection:
         projected = [self._project(doc, projection) for doc in matched]
         return FakeCursor(projected)
 
+    async def find_one(self, query=None, projection=None):
+        matched = [doc for doc in self.docs if self._matches(doc, query)]
+        if not matched:
+            return None
+        return self._project(matched[0], projection)
+
     async def update_one(self, query, update, upsert=False):
         self.updated.append((query, update, upsert))
 
@@ -406,6 +412,152 @@ async def test_get_financial_detail_refresh_tushare_noop_result_returns_cached_w
     assert result["source"] == "mongodb"
     assert result["is_cached"] is True
     assert "warning" in result
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_enriches_valuation_metrics_from_stock_basic_info():
+    db = FakeDb(
+        {
+            "stock_basic_info": FakeCollection(
+                [
+                    {
+                        "code": "688049",
+                        "source": "tushare",
+                        "industry": "半导体",
+                        "pe": 43.85,
+                        "pb": 4.28,
+                        "ps": 9.72,
+                        "total_mv": 89.72,
+                    },
+                    {
+                        "code": "688001",
+                        "source": "tushare",
+                        "industry": "半导体",
+                        "pe": 30.0,
+                        "pb": 3.0,
+                        "ps": 8.0,
+                        "total_mv": 120.0,
+                    },
+                    {
+                        "code": "688002",
+                        "source": "tushare",
+                        "industry": "半导体",
+                        "pe": 50.0,
+                        "pb": 5.0,
+                        "ps": 12.0,
+                        "total_mv": 60.0,
+                    },
+                ]
+            ),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "data_source": "tushare", "roe": 12},
+                    {"symbol": "688001", "report_period": "20251231", "data_source": "tushare", "roe": 8},
+                    {"symbol": "688002", "report_period": "20251231", "data_source": "tushare", "roe": 16},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["pe"]["stock_value"] == 43.85
+    assert result["metrics"]["pe"]["industry_median"] == 43.85
+    assert result["metrics"]["pe"]["sample_count"] == 3
+    assert result["metrics"]["pb"]["stock_value"] == 4.28
+    assert result["metrics"]["ps"]["stock_value"] == 9.72
+    assert result["metrics"]["total_mv"]["stock_value"] == 89.72
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_uses_basic_financial_indicator_snapshot():
+    db = FakeDb(
+        {
+            "stock_basic_info": FakeCollection(
+                [
+                    {
+                        "code": "688049",
+                        "source": "tushare",
+                        "industry": "电气设备",
+                        "roe": 2.4,
+                        "grossprofit_margin": 21.1,
+                        "netprofit_margin": 8.6,
+                        "debt_to_assets": 56.6,
+                        "or_yoy": 10.0,
+                        "netprofit_yoy": 20.0,
+                    },
+                    {
+                        "code": "600001",
+                        "source": "tushare",
+                        "industry": "电气设备",
+                        "roe": 8.0,
+                        "grossprofit_margin": 30.0,
+                        "netprofit_margin": 9.0,
+                        "debt_to_assets": 40.0,
+                        "or_yoy": 12.0,
+                        "netprofit_yoy": 22.0,
+                    },
+                    {
+                        "code": "600002",
+                        "source": "tushare",
+                        "industry": "电气设备",
+                        "roe": 16.0,
+                        "grossprofit_margin": 40.0,
+                        "netprofit_margin": 12.0,
+                        "debt_to_assets": 60.0,
+                        "or_yoy": 8.0,
+                        "netprofit_yoy": 18.0,
+                    },
+                ]
+            ),
+            "stock_financial_data": FakeCollection([]),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["roe"]["industry_median"] == 8.0
+    assert result["metrics"]["gross_margin"]["industry_median"] == 30.0
+    assert result["metrics"]["netprofit_margin"]["industry_median"] == 9.0
+    assert result["metrics"]["debt_to_assets"]["industry_median"] == 56.6
+    assert result["metrics"]["revenue_growth"]["industry_median"] == 10.0
+    assert result["metrics"]["net_profit_growth"]["industry_median"] == 20.0
+
+
+@pytest.mark.asyncio
+async def test_get_industry_comparison_prefers_non_empty_tushare_industry_doc():
+    db = FakeDb(
+        {
+            "stock_basic_info": FakeCollection(
+                [
+                    {"code": "688049", "source": "akshare", "industry": "", "market": "科创板"},
+                    {"code": "688049", "source": "tushare", "industry": "半导体", "market": "科创板"},
+                ]
+            ),
+            "stock_financial_data": FakeCollection(
+                [
+                    {"symbol": "688049", "report_period": "20251231", "data_source": "tushare", "roe": 12},
+                    {"symbol": "688001", "report_period": "20251231", "data_source": "tushare", "roe": 8},
+                    {"symbol": "688002", "report_period": "20251231", "data_source": "tushare", "roe": 16},
+                ]
+            ),
+        }
+    )
+    service = StockDetailInsightService(db=db)
+    service._industry_codes = lambda industry: ["688049", "688001", "688002"]
+
+    result = await service.get_industry_comparison("688049")
+
+    assert result["status"] == "ok"
+    assert result["industry"] == "半导体"
+    assert result["sample_count"] == 3
+    assert result["metrics"]["roe"]["stock_value"] == 12
 
 
 @pytest.mark.asyncio

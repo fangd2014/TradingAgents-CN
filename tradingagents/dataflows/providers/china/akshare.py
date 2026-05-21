@@ -13,6 +13,24 @@ from ..base_provider import BaseStockDataProvider
 logger = logging.getLogger(__name__)
 
 
+def _is_transient_network_error(error: Exception | str) -> bool:
+    """Return True for noisy provider/network failures that already have fallbacks."""
+    text = str(error).lower()
+    transient_markers = (
+        "connection closed abruptly",
+        "remote end closed connection",
+        "remotedisconnected",
+        "connection aborted",
+        "curl: (56)",
+        "unexpected_eof",
+        "timed out",
+        "timeout",
+        "read timed out",
+        "connection reset",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
 class AKShareProvider(BaseStockDataProvider):
     """
     AKShare统一数据提供器
@@ -97,7 +115,9 @@ class AKShareProvider(BaseStockDataProvider):
                             # curl_cffi 失败，回退到标准 requests
                             error_msg = str(e)
                             # 忽略 TLS 库错误和 400 错误的详细日志（这是 Docker 环境的已知问题）
-                            if 'invalid library' not in error_msg and '400' not in error_msg:
+                            if _is_transient_network_error(error_msg):
+                                logger.debug(f"curl_cffi 请求瞬时失败，回退到标准 requests: {e}")
+                            elif 'invalid library' not in error_msg and '400' not in error_msg:
                                 logger.warning(f"⚠️ curl_cffi 请求失败，回退到标准 requests: {e}")
 
                     # 标准 requests 请求（非东方财富网，或 curl_cffi 不可用/失败）
@@ -725,7 +745,7 @@ class AKShareProvider(BaseStockDataProvider):
                 def fetch_bid_ask():
                     return self.ak.stock_bid_ask_em(symbol=code)
 
-                bid_ask_df = await asyncio.to_thread(fetch_bid_ask)
+                bid_ask_df = await asyncio.wait_for(asyncio.to_thread(fetch_bid_ask), timeout=8.0)
 
                 logger.info(f"📊 stock_bid_ask_em 返回数据类型: {type(bid_ask_df)}")
                 if bid_ask_df is not None:
@@ -740,9 +760,12 @@ class AKShareProvider(BaseStockDataProvider):
                     logger.info(f"✅ {code} 实时行情获取成功: 来源=stock_bid_ask_em, 最新价={quotes['price']}, 涨跌幅={quotes['change_percent']}%, 成交量={quotes['volume']}, 成交额={quotes['amount']}")
                     return quotes
 
-                logger.warning(f"⚠️ stock_bid_ask_em 未返回 {code} 的行情数据，尝试备份接口")
+                logger.info(f"stock_bid_ask_em 未返回 {code} 的行情数据，尝试备份接口")
             except Exception as primary_error:
-                logger.warning(f"⚠️ stock_bid_ask_em 获取 {code} 失败，尝试备份接口: {primary_error}")
+                if _is_transient_network_error(primary_error):
+                    logger.info(f"stock_bid_ask_em 获取 {code} 瞬时失败，尝试备份接口")
+                else:
+                    logger.warning(f"⚠️ stock_bid_ask_em 获取 {code} 失败，尝试备份接口: {primary_error}")
 
             fallback_quotes = await self._get_realtime_quotes_data(code)
             if fallback_quotes:

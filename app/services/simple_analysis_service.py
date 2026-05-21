@@ -6,6 +6,8 @@
 import asyncio
 import uuid
 import logging
+import re
+import json
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -48,6 +50,254 @@ logger = logging.getLogger("app.services.simple_analysis_service")
 
 # 配置服务实例
 config_service = ConfigService()
+
+
+def _truncate_for_log(value: Any, max_len: int = 500) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) > max_len:
+        return text[:max_len] + "...<truncated>"
+    return text
+
+
+def _json_for_log(data: Dict[str, Any]) -> str:
+    try:
+        return json.dumps(data, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:
+        return repr(data)
+
+
+def _safe_request_log_context(
+    task_id: str,
+    user_id: Optional[str],
+    request: Optional[SingleAnalysisRequest],
+) -> Dict[str, Any]:
+    parameters = getattr(request, "parameters", None) if request else None
+    context: Dict[str, Any] = {
+        "task_id": task_id,
+        "user_id": str(user_id) if user_id is not None else None,
+        "stock_code": getattr(request, "stock_code", None) if request else None,
+    }
+    if parameters:
+        context.update({
+            "market_type": getattr(parameters, "market_type", None),
+            "analysis_date": getattr(parameters, "analysis_date", None),
+            "research_depth": getattr(parameters, "research_depth", None),
+            "selected_analysts": getattr(parameters, "selected_analysts", None),
+            "include_sentiment": getattr(parameters, "include_sentiment", None),
+            "include_risk": getattr(parameters, "include_risk", None),
+            "quick_analysis_model": getattr(parameters, "quick_analysis_model", None),
+            "deep_analysis_model": getattr(parameters, "deep_analysis_model", None),
+            "positive_side_model": getattr(parameters, "positive_side_model", None),
+            "negative_side_model": getattr(parameters, "negative_side_model", None),
+            "bull_researcher_model": getattr(parameters, "bull_researcher_model", None),
+            "bear_researcher_model": getattr(parameters, "bear_researcher_model", None),
+            "risky_analyst_model": getattr(parameters, "risky_analyst_model", None),
+            "safe_analyst_model": getattr(parameters, "safe_analyst_model", None),
+        })
+    return context
+
+
+def _safe_exception_log_context(exc: BaseException) -> Dict[str, Any]:
+    context: Dict[str, Any] = {
+        "exception_type": type(exc).__name__,
+        "exception_module": type(exc).__module__,
+        "message": _truncate_for_log(str(exc), 1000),
+        "repr": _truncate_for_log(repr(exc), 1000),
+    }
+
+    for attr in ("status_code", "code", "param", "request_id", "type"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            context[attr] = _truncate_for_log(value, 500)
+
+    body = getattr(exc, "body", None)
+    if body is not None:
+        context["body"] = _truncate_for_log(body, 1000)
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        context["response_status_code"] = getattr(response, "status_code", None)
+        try:
+            context["response_text"] = _truncate_for_log(response.text, 1000)
+        except Exception:
+            pass
+
+    request_obj = getattr(exc, "request", None)
+    if request_obj is not None:
+        context["request_method"] = getattr(request_obj, "method", None)
+        context["request_url"] = _truncate_for_log(getattr(request_obj, "url", None), 500)
+
+    if exc.__cause__:
+        context["cause"] = {
+            "type": type(exc.__cause__).__name__,
+            "module": type(exc.__cause__).__module__,
+            "message": _truncate_for_log(str(exc.__cause__), 1000),
+            "repr": _truncate_for_log(repr(exc.__cause__), 1000),
+        }
+    if exc.__context__ and exc.__context__ is not exc.__cause__:
+        context["context"] = {
+            "type": type(exc.__context__).__name__,
+            "module": type(exc.__context__).__module__,
+            "message": _truncate_for_log(str(exc.__context__), 1000),
+            "repr": _truncate_for_log(repr(exc.__context__), 1000),
+        }
+
+    return context
+
+
+def _merge_log_context(*parts: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for part in parts:
+        merged.update({key: value for key, value in part.items() if value is not None})
+    return merged
+
+
+def _analysis_market_to_api_market(market_type: Optional[str]) -> str:
+    market = str(market_type or "").strip()
+    if market in {"港股", "HK", "hk"}:
+        return "HK"
+    if market in {"美股", "US", "us"}:
+        return "US"
+    return "CN"
+
+
+def _looks_like_stock_code(value: str, market_type: Optional[str] = None) -> bool:
+    text = str(value or "").strip().upper()
+    if not text:
+        return False
+    market = _analysis_market_to_api_market(market_type)
+    if market == "CN":
+        return bool(re.match(r"^\d{6}$", text)) or bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", text))
+    if market == "HK":
+        return bool(re.match(r"^\d{1,5}(\.HK)?$", text))
+    if market == "US":
+        return bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", text))
+    return (
+        bool(re.match(r"^\d{6}$", text))
+        or bool(re.match(r"^\d{1,5}(\.HK)?$", text))
+        or bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", text))
+    )
+
+
+def _get_stock_search_db():
+    """Get a MongoDB handle for stock lookup, even outside the app lifecycle."""
+    try:
+        return get_mongo_db(), None
+    except RuntimeError as exc:
+        if "MongoDB数据库未初始化" not in str(exc):
+            raise
+
+    from app.core.config import settings
+    from motor.motor_asyncio import AsyncIOMotorClient
+
+    client = AsyncIOMotorClient(
+        settings.MONGO_URI,
+        maxPoolSize=1,
+        minPoolSize=0,
+        maxIdleTimeMS=30000,
+        serverSelectionTimeoutMS=settings.MONGO_SERVER_SELECTION_TIMEOUT_MS,
+        connectTimeoutMS=settings.MONGO_CONNECT_TIMEOUT_MS,
+        socketTimeoutMS=settings.MONGO_SOCKET_TIMEOUT_MS,
+    )
+    return client[settings.MONGO_DB], client
+
+
+async def resolve_stock_input_for_analysis(
+    value: str,
+    market_type: Optional[str] = None,
+) -> Dict[str, Optional[str]]:
+    """Resolve user stock input that may be a code or a display name."""
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("股票代码不能为空")
+
+    if _looks_like_stock_code(text, market_type):
+        normalized = text.upper()
+        if normalized.endswith(".HK"):
+            normalized = normalized[:-3].zfill(5)
+        elif _analysis_market_to_api_market(market_type) == "HK" and normalized.isdigit():
+            normalized = normalized.zfill(5)
+        return {"symbol": normalized, "name": None}
+
+    from app.services.unified_stock_service import UnifiedStockService
+
+    market = _analysis_market_to_api_market(market_type)
+    temp_client = None
+    try:
+        db, temp_client = _get_stock_search_db()
+        service = UnifiedStockService(db)
+        results = await service.search_stocks(market, text, 5)
+    finally:
+        if temp_client:
+            temp_client.close()
+
+    if not results:
+        raise ValueError(f"未找到与“{text}”匹配的股票，请输入股票代码或更完整的名称")
+
+    exact = next((item for item in results if item.get("name") == text or item.get("code") == text), None)
+    selected = exact or results[0]
+    symbol = str(selected.get("code") or "").strip()
+    if not symbol:
+        raise ValueError(f"未能解析“{text}”对应的股票代码")
+    if market == "HK":
+        symbol = symbol.zfill(5)
+
+    return {"symbol": symbol.upper(), "name": selected.get("name")}
+
+
+def extract_role_models_from_parameters(parameters: Optional[AnalysisParameters]) -> Dict[str, Optional[str]]:
+    """Extract side-level and role-level model overrides from analysis parameters."""
+    if not parameters:
+        return {}
+
+    role_fields = (
+        "positive_side_model",
+        "negative_side_model",
+        "bull_researcher_model",
+        "bear_researcher_model",
+        "risky_analyst_model",
+        "safe_analyst_model",
+    )
+    return {
+        field: getattr(parameters, field, None)
+        for field in role_fields
+        if getattr(parameters, field, None)
+    }
+
+
+def get_model_config_map_sync(model_names: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Read model runtime parameters from Mongo for the requested model names."""
+    requested = {name for name in model_names if name}
+    if not requested:
+        return {}
+
+    configs: Dict[str, Dict[str, Any]] = {}
+    try:
+        from pymongo import MongoClient
+        from app.core.config import settings
+
+        client = MongoClient(settings.MONGO_URI)
+        try:
+            db = client[settings.MONGO_DB]
+            doc = db.system_configs.find_one({"is_active": True}, sort=[("version", -1)])
+            for llm_config in (doc or {}).get("llm_configs", []):
+                model_name = llm_config.get("model_name")
+                if model_name in requested:
+                    configs[model_name] = {
+                        "max_tokens": llm_config.get("max_tokens", 4000),
+                        "temperature": llm_config.get("temperature", 0.7),
+                        "timeout": llm_config.get("timeout", 180),
+                        "retry_times": llm_config.get("retry_times", 3),
+                        "api_base": llm_config.get("api_base"),
+                    }
+        finally:
+            client.close()
+    except Exception as e:
+        logger.warning(f"⚠️ 从 MongoDB 读取角色模型配置失败: {e}，将使用默认参数")
+
+    return configs
 
 
 async def get_provider_by_model_name(model_name: str) -> str:
@@ -97,6 +347,32 @@ def get_provider_by_model_name_sync(model_name: str) -> str:
     return provider_info["provider"]
 
 
+def normalize_model_name_for_analysis(provider: str, model_name: str) -> str:
+    """Normalize model ID for provider API calls while keeping UI config flexible."""
+    try:
+        from tradingagents.llm_clients.provider_keys import normalize_model_name_for_provider
+
+        return normalize_model_name_for_provider(provider, model_name)
+    except Exception:
+        return model_name
+
+
+def normalize_backend_url_for_analysis(provider: str, backend_url: str) -> str:
+    """Normalize legacy provider URLs to the API style used by the runtime client."""
+    from tradingagents.llm_clients.provider_keys import normalize_backend_url_for_provider, normalize_provider_key
+
+    provider_key = normalize_provider_key(provider)
+    normalized_url = str(backend_url).strip().rstrip("/") if backend_url else ""
+    normalized_backend_url = normalize_backend_url_for_provider(provider_key, backend_url)
+    if normalized_url and normalized_backend_url != normalized_url:
+        logger.warning(
+            "⚠️ [API地址] 检测到非兼容接口地址，已切换为 OpenAI compatible-mode: %s",
+            normalized_url,
+        )
+
+    return normalized_backend_url
+
+
 def get_provider_and_url_by_model_sync(model_name: str) -> dict:
     """
     根据模型名称从数据库配置中查找对应的供应商和 API URL（同步版本）
@@ -131,16 +407,16 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
 
                     # 从 llm_providers 集合中查找厂家配置
                     providers_collection = db.llm_providers
-                    provider_doc = providers_collection.find_one({"name": provider})
+                    provider_doc = _find_provider_doc(providers_collection, provider)
 
                     # 🔥 确定 API Key（优先级：模型配置 > 厂家配置 > 环境变量）
                     api_key = None
-                    if model_api_key and model_api_key.strip() and model_api_key != "your-api-key":
+                    if _is_valid_config_api_key(model_api_key):
                         api_key = model_api_key
                         logger.info(f"✅ [同步查询] 使用模型配置的 API Key")
                     elif provider_doc and provider_doc.get("api_key"):
                         provider_api_key = provider_doc["api_key"]
-                        if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
+                        if _is_valid_config_api_key(provider_api_key):
                             api_key = provider_api_key
                             logger.info(f"✅ [同步查询] 使用厂家配置的 API Key")
 
@@ -164,17 +440,17 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
                         backend_url = _get_default_backend_url(provider)
                         logger.warning(f"⚠️ [同步查询] 厂家 {provider} 没有配置 default_base_url，使用硬编码默认值")
 
-                    from tradingagents.llm_clients.provider_keys import normalize_provider_key, default_backend_url
+                    from tradingagents.llm_clients.provider_keys import normalize_provider_key
 
                     provider_key = normalize_provider_key(provider)
-                    if provider_key == "qwen" and backend_url == "https://dashscope.aliyuncs.com/api/v1":
-                        backend_url = default_backend_url(provider_key)
+                    backend_url = normalize_backend_url_for_analysis(provider_key, backend_url)
 
                     client.close()
                     return {
                         "provider": provider_key,
                         "backend_url": backend_url,
-                        "api_key": api_key
+                        "api_key": api_key,
+                        "model_name": normalize_model_name_for_analysis(provider_key, model_name)
                     }
 
         client.close()
@@ -188,7 +464,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             client = MongoClient(settings.MONGO_URI)
             db = client[settings.MONGO_DB]
             providers_collection = db.llm_providers
-            provider_doc = providers_collection.find_one({"name": provider})
+            provider_doc = _find_provider_doc(providers_collection, provider)
 
             backend_url = _get_default_backend_url(provider)
             api_key = None
@@ -200,7 +476,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
 
                 if provider_doc.get("api_key"):
                     provider_api_key = provider_doc["api_key"]
-                    if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
+                    if _is_valid_config_api_key(provider_api_key):
                         api_key = provider_api_key
                         logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 API Key")
 
@@ -210,17 +486,17 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
                 if api_key:
                     logger.info(f"✅ [同步查询] 使用环境变量的 API Key")
 
-            from tradingagents.llm_clients.provider_keys import normalize_provider_key, default_backend_url
+            from tradingagents.llm_clients.provider_keys import normalize_provider_key
 
             provider_key = normalize_provider_key(provider)
-            if provider_key == "qwen" and backend_url == "https://dashscope.aliyuncs.com/api/v1":
-                backend_url = default_backend_url(provider_key)
+            backend_url = normalize_backend_url_for_analysis(provider_key, backend_url)
 
             client.close()
             return {
                 "provider": provider_key,
                 "backend_url": backend_url,
-                "api_key": api_key
+                "api_key": api_key,
+                "model_name": normalize_model_name_for_analysis(provider_key, model_name)
             }
         except Exception as e:
             logger.warning(f"⚠️ [同步查询] 无法查询厂家配置: {e}")
@@ -232,7 +508,8 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
         return {
             "provider": provider_key,
             "backend_url": _get_default_backend_url(provider_key),
-            "api_key": _get_env_api_key_for_provider(provider_key)
+            "api_key": _get_env_api_key_for_provider(provider_key),
+            "model_name": normalize_model_name_for_analysis(provider_key, model_name)
         }
 
     except Exception as e:
@@ -247,7 +524,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             client = MongoClient(settings.MONGO_URI)
             db = client[settings.MONGO_DB]
             providers_collection = db.llm_providers
-            provider_doc = providers_collection.find_one({"name": provider})
+            provider_doc = _find_provider_doc(providers_collection, provider)
 
             backend_url = _get_default_backend_url(provider)
             api_key = None
@@ -259,7 +536,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
 
                 if provider_doc.get("api_key"):
                     provider_api_key = provider_doc["api_key"]
-                    if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
+                    if _is_valid_config_api_key(provider_api_key):
                         api_key = provider_api_key
                         logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 API Key")
 
@@ -268,20 +545,67 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
                 api_key = _get_env_api_key_for_provider(provider)
 
             client.close()
+            provider_key = normalize_provider_key(provider)
+            backend_url = normalize_backend_url_for_analysis(provider_key, backend_url)
             return {
-                "provider": provider,
+                "provider": provider_key,
                 "backend_url": backend_url,
-                "api_key": api_key
+                "api_key": api_key,
+                "model_name": normalize_model_name_for_analysis(provider_key, model_name)
             }
         except Exception as e2:
             logger.warning(f"⚠️ [同步查询] 无法查询厂家配置: {e2}")
 
         # 最后回退到硬编码的默认 URL 和环境变量 API Key
+        from tradingagents.llm_clients.provider_keys import normalize_provider_key
+
+        provider_key = normalize_provider_key(provider)
         return {
-            "provider": provider,
-            "backend_url": _get_default_backend_url(provider),
-            "api_key": _get_env_api_key_for_provider(provider)
+            "provider": provider_key,
+            "backend_url": normalize_backend_url_for_analysis(provider_key, _get_default_backend_url(provider_key)),
+            "api_key": _get_env_api_key_for_provider(provider_key),
+            "model_name": normalize_model_name_for_analysis(provider_key, model_name)
         }
+
+
+def _is_valid_config_api_key(api_key: str) -> bool:
+    """Return whether a persisted API key is usable for LLM calls."""
+    try:
+        from app.utils.api_key_utils import is_valid_api_key
+        return is_valid_api_key(api_key)
+    except Exception:
+        if not api_key:
+            return False
+        api_key = str(api_key).strip()
+        return (
+            len(api_key) > 10
+            and not api_key.startswith(("your_", "your-"))
+            and not api_key.endswith(("_here", "-here"))
+            and "..." not in api_key
+        )
+
+
+def _provider_lookup_names(provider: str) -> list[str]:
+    """Return database provider keys to try for canonical and legacy aliases."""
+    from tradingagents.llm_clients.provider_keys import canonical_aliases, normalize_provider_key
+
+    provider_key = normalize_provider_key(provider)
+    names = [provider_key]
+    names.extend(canonical_aliases(provider_key))
+
+    if provider and provider not in names:
+        names.append(provider)
+
+    return names
+
+
+def _find_provider_doc(providers_collection, provider: str):
+    """Find provider config by canonical key or known aliases."""
+    for provider_name in _provider_lookup_names(provider):
+        provider_doc = providers_collection.find_one({"name": provider_name})
+        if provider_doc:
+            return provider_doc
+    return None
 
 
 def _get_env_api_key_for_provider(provider: str) -> str:
@@ -363,7 +687,10 @@ def _get_default_provider_by_model(model_name: str) -> str:
         'gemini-2.0-flash-thinking-exp': 'google',
 
         # DeepSeek
+        'deepseek-v4-flash': 'deepseek',
+        'deepseek-v4-pro': 'deepseek',
         'deepseek-chat': 'deepseek',
+        'deepseek-reasoner': 'deepseek',
         'deepseek-coder': 'deepseek',
 
         # 智谱AI
@@ -385,7 +712,9 @@ def create_analysis_config(
     llm_provider: str,
     market_type: str = "A股",
     quick_model_config: dict = None,  # 新增：快速模型的完整配置
-    deep_model_config: dict = None    # 新增：深度模型的完整配置
+    deep_model_config: dict = None,   # 新增：深度模型的完整配置
+    role_models: dict = None,
+    role_model_configs: dict = None
 ) -> dict:
     """
     创建分析配置 - 支持数字等级和中文等级
@@ -399,6 +728,8 @@ def create_analysis_config(
         market_type: 市场类型
         quick_model_config: 快速模型的完整配置（包含 max_tokens、temperature、timeout 等）
         deep_model_config: 深度模型的完整配置（包含 max_tokens、temperature、timeout 等）
+        role_models: 多空双方/角色模型配置
+        role_model_configs: 角色模型的完整配置（包含 max_tokens、temperature、timeout 等）
 
     Returns:
         dict: 完整的分析配置
@@ -512,6 +843,15 @@ def create_analysis_config(
         quick_provider_info = get_provider_and_url_by_model_sync(quick_model)
         deep_provider_info = get_provider_and_url_by_model_sync(deep_model)
 
+        normalized_quick_model = quick_provider_info.get("model_name") or quick_model
+        normalized_deep_model = deep_provider_info.get("model_name") or deep_model
+        if normalized_quick_model != quick_model:
+            logger.info(f"✅ [模型规范化] 快速模型: {quick_model} -> {normalized_quick_model}")
+            config["quick_think_llm"] = normalized_quick_model
+        if normalized_deep_model != deep_model:
+            logger.info(f"✅ [模型规范化] 深度模型: {deep_model} -> {normalized_deep_model}")
+            config["deep_think_llm"] = normalized_deep_model
+
         config["backend_url"] = quick_provider_info["backend_url"]
         config["quick_api_key"] = quick_provider_info.get("api_key")  # 🔥 保存快速模型的 API Key
         config["deep_api_key"] = deep_provider_info.get("api_key")    # 🔥 保存深度模型的 API Key
@@ -548,6 +888,42 @@ def create_analysis_config(
                    f"timeout={deep_model_config.get('timeout')}, "
                    f"retry_times={deep_model_config.get('retry_times')}")
 
+    role_models = role_models or {}
+    role_model_configs = role_model_configs or {}
+    role_defaults = {
+        "bull_researcher": role_models.get("bull_researcher_model") or role_models.get("positive_side_model") or quick_model,
+        "risky_analyst": role_models.get("risky_analyst_model") or role_models.get("positive_side_model") or quick_model,
+        "bear_researcher": role_models.get("bear_researcher_model") or role_models.get("negative_side_model") or quick_model,
+        "safe_analyst": role_models.get("safe_analyst_model") or role_models.get("negative_side_model") or quick_model,
+    }
+    role_llm_configs = {}
+    for role_name, role_model in role_defaults.items():
+        if not role_model or role_model == quick_model:
+            continue
+
+        try:
+            provider_info = get_provider_and_url_by_model_sync(role_model)
+        except Exception as e:
+            logger.warning(f"⚠️ [角色模型] {role_name}={role_model} 查询供应商失败: {e}，回退到快速模型")
+            continue
+
+        role_llm_configs[role_name] = {
+            "model": provider_info.get("model_name") or role_model,
+            "provider": provider_info.get("provider") or llm_provider,
+            "backend_url": provider_info.get("backend_url") or config.get("backend_url"),
+            "api_key": provider_info.get("api_key"),
+            "model_config": role_model_configs.get(role_model, {}),
+        }
+        logger.info(
+            f"🎭 [角色模型] {role_name}: model={role_model}, "
+            f"provider={role_llm_configs[role_name]['provider']}, "
+            f"url={role_llm_configs[role_name]['backend_url']}, "
+            f"api_key={'已配置' if role_llm_configs[role_name].get('api_key') else '未配置'}"
+        )
+
+    config["role_model_overrides"] = role_defaults
+    config["role_llm_configs"] = role_llm_configs
+
     logger.info(f"📋 ========== 创建分析配置完成 ==========")
     logger.info(f"   🎯 研究深度: {research_depth}")
     logger.info(f"   🔥 辩论轮次: {config['max_debate_rounds']}")
@@ -557,6 +933,8 @@ def create_analysis_config(
     logger.info(f"   🤖 LLM供应商: {llm_provider}")
     logger.info(f"   ⚡ 快速模型: {config['quick_think_llm']}")
     logger.info(f"   🧠 深度模型: {config['deep_think_llm']}")
+    logger.info(f"   🎭 正方模型: 多头={role_defaults['bull_researcher']}, 激进={role_defaults['risky_analyst']}")
+    logger.info(f"   🎭 反方模型: 空头={role_defaults['bear_researcher']}, 保守={role_defaults['safe_analyst']}")
     logger.info(f"📋 ========================================")
 
     return config
@@ -715,6 +1093,15 @@ class SimpleAnalysisService:
             stock_code = request.get_symbol()
             if not stock_code:
                 raise ValueError("股票代码不能为空")
+            resolved_stock = await resolve_stock_input_for_analysis(
+                stock_code,
+                request.parameters.market_type if request.parameters else None,
+            )
+            stock_code = resolved_stock["symbol"] or stock_code
+            if resolved_stock.get("name") and not request.stock_name:
+                request.stock_name = resolved_stock["name"]
+            request.symbol = stock_code
+            request.stock_code = stock_code
 
             logger.info(f"📝 创建分析任务: {task_id} - {stock_code}")
             logger.info(f"🔍 内存管理器实例ID: {id(self.memory_manager)}")
@@ -725,7 +1112,7 @@ class SimpleAnalysisService:
                 user_id=user_id,
                 stock_code=stock_code,
                 parameters=request.parameters.model_dump() if request.parameters else {},
-                stock_name=(self._resolve_stock_name(stock_code) if hasattr(self, '_resolve_stock_name') else None),
+                stock_name=request.stock_name or (self._resolve_stock_name(stock_code) if hasattr(self, '_resolve_stock_name') else None),
             )
 
             logger.info(f"✅ 任务状态已创建: {task_state.task_id}")
@@ -739,7 +1126,7 @@ class SimpleAnalysisService:
 
             # 补齐股票名称并写入数据库任务文档的初始记录
             code = stock_code
-            name = self._resolve_stock_name(code) if hasattr(self, '_resolve_stock_name') else f"股票{code}"
+            name = request.stock_name or (self._resolve_stock_name(code) if hasattr(self, '_resolve_stock_name') else f"股票{code}")
 
             try:
                 db = get_mongo_db()
@@ -789,6 +1176,18 @@ class SimpleAnalysisService:
         """在后台执行分析任务"""
         # 🔧 使用 get_symbol() 方法获取股票代码（兼容 symbol 和 stock_code 字段）
         stock_code = request.get_symbol()
+        try:
+            resolved_stock = await resolve_stock_input_for_analysis(
+                stock_code,
+                request.parameters.market_type if request.parameters else None,
+            )
+            stock_code = resolved_stock["symbol"] or stock_code
+            if resolved_stock.get("name") and not request.stock_name:
+                request.stock_name = resolved_stock["name"]
+            request.symbol = stock_code
+            request.stock_code = stock_code
+        except Exception as resolve_error:
+            logger.warning(f"⚠️ 股票输入解析失败，继续使用原始输入: {stock_code} - {resolve_error}")
 
         # 添加最外层的异常捕获，确保所有异常都被记录
         try:
@@ -987,18 +1386,26 @@ class SimpleAnalysisService:
             logger.info(f"✅ 后台分析任务完成: {task_id}")
 
         except Exception as e:
-            logger.error(f"❌ 后台分析任务失败: {task_id} - {e}")
+            logger.error(
+                "❌ 后台分析任务失败: %s | context=%s",
+                task_id,
+                _json_for_log(_merge_log_context(
+                    _safe_request_log_context(task_id, str(user_id), request),
+                    _safe_exception_log_context(e),
+                )),
+                exc_info=True,
+            )
 
             # 格式化错误信息为用户友好的提示
             from ..utils.error_formatter import ErrorFormatter
 
             # 收集上下文信息
-            error_context = {}
+            error_context = _safe_request_log_context(task_id, str(user_id), request)
             if hasattr(request, 'parameters') and request.parameters:
-                if hasattr(request.parameters, 'quick_model'):
-                    error_context['model'] = request.parameters.quick_model
-                if hasattr(request.parameters, 'deep_model'):
-                    error_context['model'] = request.parameters.deep_model
+                if getattr(request.parameters, 'quick_analysis_model', None):
+                    error_context['model'] = request.parameters.quick_analysis_model
+                if getattr(request.parameters, 'deep_analysis_model', None):
+                    error_context['deep_model'] = request.parameters.deep_analysis_model
 
             # 格式化错误
             formatted_error = ErrorFormatter.format_error(str(e), error_context)
@@ -1190,6 +1597,8 @@ class SimpleAnalysisService:
             deep_provider = deep_provider_info["provider"]
             quick_backend_url = quick_provider_info["backend_url"]
             deep_backend_url = deep_provider_info["backend_url"]
+            role_models = extract_role_models_from_parameters(request.parameters)
+            role_model_configs = get_model_config_map_sync(list(role_models.values()))
 
             logger.info(f"🔍 [供应商查找] 快速模型 {quick_model} 对应的供应商: {quick_provider}")
             logger.info(f"🔍 [API地址] 快速模型使用 backend_url: {quick_backend_url}")
@@ -1213,7 +1622,9 @@ class SimpleAnalysisService:
                 quick_model=quick_model,
                 deep_model=deep_model,
                 llm_provider=quick_provider,  # 主要使用快速模型的供应商
-                market_type=market_type  # 使用前端传递的市场类型
+                market_type=market_type,  # 使用前端传递的市场类型
+                role_models=role_models,
+                role_model_configs=role_model_configs
             )
 
             # 🔧 添加混合模式配置
@@ -1222,6 +1633,22 @@ class SimpleAnalysisService:
             config["quick_backend_url"] = quick_backend_url
             config["deep_backend_url"] = deep_backend_url
             config["backend_url"] = quick_backend_url  # 保持向后兼容
+            analysis_log_context = _safe_request_log_context(task_id, str(user_id), request)
+            analysis_log_context.update({
+                "quick_model": quick_model,
+                "deep_model": deep_model,
+                "quick_provider": quick_provider,
+                "deep_provider": deep_provider,
+                "quick_backend_url": quick_backend_url,
+                "deep_backend_url": deep_backend_url,
+                "role_models": role_models,
+                "role_model_timeouts": {
+                    role: role_model_configs.get(model, {}).get("timeout")
+                    for role, model in role_models.items()
+                    if model
+                },
+            })
+            logger.info("🧭 [分析上下文] %s", _json_for_log(analysis_log_context))
 
             # 🔍 验证配置中的模型
             logger.info(f"🔍 [模型验证] 配置中的快速模型: {config.get('quick_think_llm')}")
@@ -1794,18 +2221,28 @@ class SimpleAnalysisService:
             return result
 
         except Exception as e:
-            logger.error(f"❌ [线程池] 分析执行失败: {task_id} - {e}")
+            log_context = _merge_log_context(
+                _safe_request_log_context(task_id, str(user_id), request),
+                locals().get("analysis_log_context", {}),
+                _safe_exception_log_context(e),
+            )
+            logger.error(
+                "❌ [线程池] 分析执行失败: %s | context=%s",
+                task_id,
+                _json_for_log(log_context),
+                exc_info=True,
+            )
 
             # 格式化错误信息为用户友好的提示
             from ..utils.error_formatter import ErrorFormatter
 
             # 收集上下文信息
-            error_context = {}
+            error_context = _safe_request_log_context(task_id, str(user_id), request)
             if request and hasattr(request, 'parameters') and request.parameters:
-                if hasattr(request.parameters, 'quick_model'):
-                    error_context['model'] = request.parameters.quick_model
-                if hasattr(request.parameters, 'deep_model'):
-                    error_context['model'] = request.parameters.deep_model
+                if getattr(request.parameters, 'quick_analysis_model', None):
+                    error_context['model'] = request.parameters.quick_analysis_model
+                if getattr(request.parameters, 'deep_analysis_model', None):
+                    error_context['deep_model'] = request.parameters.deep_analysis_model
 
             # 格式化错误
             formatted_error = ErrorFormatter.format_error(str(e), error_context)
@@ -2090,6 +2527,11 @@ class SimpleAnalysisService:
                     item = {
                         "task_id": doc.get("task_id"),
                         "user_id": str(user_field_val) if user_field_val is not None else None,
+                        "task_type": doc.get("task_type", "analysis"),
+                        "screening_type": doc.get("screening_type"),
+                        "strategy_id": doc.get("strategy_id"),
+                        "strategy_name": doc.get("strategy_name"),
+                        "title": doc.get("title"),
                         "symbol": stock_code_value,  # 🔧 添加 symbol 字段（前端优先使用）
                         "stock_code": stock_code_value,  # 🔧 兼容字段
                         "stock_symbol": stock_code_value,  # 🔧 兼容字段
@@ -2106,15 +2548,11 @@ class SimpleAnalysisService:
                         # 为兼容前端，这里沿用 memory_manager 的字段名
                         "result_data": doc.get("result"),
                     }
-                    # 时间格式转为 ISO 字符串（添加时区信息）
+                    # MongoDB stores naive datetimes as UTC; convert them to the configured display timezone.
+                    from app.utils.timezone import to_config_tz
                     for k in ("start_time", "end_time"):
                         if item.get(k) and hasattr(item[k], "isoformat"):
-                            dt = item[k]
-                            # 如果是 naive datetime（没有时区信息），假定为 UTC+8
-                            if dt.tzinfo is None:
-                                from datetime import timezone, timedelta
-                                china_tz = timezone(timedelta(hours=8))
-                                dt = dt.replace(tzinfo=china_tz)
+                            dt = to_config_tz(item[k])
                             item[k] = dt.isoformat()
                     mongo_tasks.append(item)
 
@@ -2165,9 +2603,8 @@ class SimpleAnalysisService:
             # 分页
             results = merged_tasks[offset:offset + limit]
 
-            # 🔥 统一处理时区信息（确保所有时间字段都有时区标识）
-            from datetime import timezone, timedelta
-            china_tz = timezone(timedelta(hours=8))
+            # 🔥 统一处理时区信息（MongoDB naive datetime 按 UTC 解释，内存字符串保持后端本地时间语义）
+            from app.utils.timezone import to_config_tz
 
             for task in results:
                 for time_field in ("start_time", "end_time", "created_at", "started_at", "completed_at"):
@@ -2175,9 +2612,7 @@ class SimpleAnalysisService:
                     if value:
                         # 如果是 datetime 对象
                         if hasattr(value, "isoformat"):
-                            # 如果是 naive datetime，添加时区信息
-                            if value.tzinfo is None:
-                                value = value.replace(tzinfo=china_tz)
+                            value = to_config_tz(value)
                             task[time_field] = value.isoformat()
                         # 如果是字符串且没有时区标识，添加时区标识
                         elif isinstance(value, str) and value and not value.endswith(('Z', '+08:00', '+00:00')):

@@ -130,6 +130,60 @@ export interface TechnicalFactorsResponse {
   message?: string
 }
 
+export type ShareholderScope = 'top10' | 'float_top10'
+
+export interface ShareholderItem {
+  code: string
+  ts_code?: string
+  holder_scope: ShareholderScope
+  end_date: string
+  ann_date?: string
+  rank?: number
+  holder_name: string
+  holder_name_normalized?: string
+  hold_amount?: number | null
+  hold_ratio?: number | null
+  hold_change?: number | null
+  source?: string
+  updated_at?: string
+  change_type?: string
+  amount_delta?: number | null
+  ratio_delta?: number | null
+  rank_change?: number | null
+  previous?: ShareholderItem | null
+}
+
+export interface ShareholderChanges {
+  new_count: number
+  exited_count: number
+  increased_count: number
+  decreased_count: number
+  rank_changed_count: number
+  items: ShareholderItem[]
+  message?: string
+}
+
+export interface ShareholderPeriod {
+  period: string
+  items: ShareholderItem[]
+}
+
+export interface ShareholdersResponse {
+  code: string
+  scope: ShareholderScope
+  status: string
+  latest_period?: string | null
+  previous_period?: string | null
+  source?: string
+  last_updated?: string | null
+  is_cached?: boolean
+  latest: ShareholderItem[]
+  changes: ShareholderChanges
+  history: ShareholderPeriod[]
+  message?: string
+  warning?: string
+}
+
 export const stocksApi = {
   /**
    * 获取股票行情
@@ -179,5 +233,9 @@ export const stocksApi = {
 
   async getTechnicalFactors(symbol: string, limit = 120, refresh = false) {
     return ApiClient.get<TechnicalFactorsResponse>(`/api/stocks/${symbol}/technical-factors`, { limit, refresh })
+  },
+
+  async getShareholders(symbol: string, scope: ShareholderScope = 'top10', periods = 4, refresh = false) {
+    return ApiClient.get<ShareholdersResponse>(`/api/stocks/${symbol}/shareholders`, { scope, periods, refresh })
   }
 }

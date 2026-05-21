@@ -229,10 +229,19 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
+    try:
+        from app.services.user_service import user_service
+        await user_service.create_admin_user()
+    except Exception as e:
+        logger.warning(f"⚠️  默认管理员用户初始化失败: {e}")
+
     #  配置桥接：将统一配置写入环境变量，供 TradingAgents 核心库使用
     try:
         from app.core.config_bridge import bridge_config_to_env
         bridge_config_to_env()
+        from app.utils.timezone import apply_process_timezone, get_timezone_name
+        active_timezone = apply_process_timezone(get_timezone_name())
+        logger.info(f"系统时区已设置为: {active_timezone}")
     except Exception as e:
         logger.warning(f"⚠️  配置桥接失败: {e}")
         logger.warning("⚠️  TradingAgents 将使用 .env 文件中的配置")

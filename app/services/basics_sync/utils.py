@@ -6,7 +6,39 @@
 """
 from __future__ import annotations
 from datetime import datetime, timedelta
+import logging
 from typing import Dict
+
+
+logger = logging.getLogger(__name__)
+
+
+def _recent_report_periods(now: datetime) -> list[str]:
+    """Return recent financial report periods, newest first."""
+    quarter_dates: list[str] = []
+    for year in (now.year, now.year - 1):
+        quarter_dates.extend(
+            [
+                f"{year}1231",
+                f"{year}0930",
+                f"{year}0630",
+                f"{year}0331",
+            ]
+        )
+    today_text = now.strftime("%Y%m%d")
+    return [date for date in quarter_dates if date <= today_text]
+
+
+def _safe_float(value) -> float | None:
+    if value is None or str(value).strip().lower() in {"", "nan", "none"}:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed != parsed:
+        return None
+    return parsed
 
 
 def fetch_stock_basic_df():
@@ -41,6 +73,11 @@ def fetch_stock_basic_df():
 
     logger.info(f"⏳ 等待 Tushare 连接...")
     while not getattr(provider, "connected", False) and elapsed < max_wait_seconds:
+        if elapsed == 0.0:
+            try:
+                provider.connect_sync()
+            except Exception as exc:
+                logger.warning(f"⚠️ Tushare 主动连接失败，继续等待: {exc}")
         time.sleep(wait_interval)
         elapsed += wait_interval
 
@@ -167,57 +204,147 @@ def fetch_daily_basic_mv_map(trade_date: str) -> Dict[str, Dict[str, float]]:
 
 def fetch_latest_roe_map() -> Dict[str, Dict[str, float]]:
     """
-    获取最近一个可用财报期的 ROE 映射（ts_code -> {"roe": float}）。
+    获取最近一个可用财报期的财务指标映射。
+
+    返回格式为 ts_code -> 指标字典，包含 ROE、毛利率、净利率、
+    资产负债率、营收同比、净利润同比等行业对比需要的字段。
     优先按最近季度的 end_date 逆序探测，找到第一期非空数据。
     """
     from tradingagents.dataflows.providers.china.tushare import get_tushare_provider
-    from datetime import datetime
 
-    provider = get_tushare_provider()
-    api = provider.api
-    if api is None:
-        raise RuntimeError("Tushare API unavailable")
-
-    # 生成最近若干个财政季度的期末日期，格式 YYYYMMDD
-    def quarter_ends(now: datetime):
-        y = now.year
-        q_dates = [
-            f"{y}0331",
-            f"{y}0630",
-            f"{y}0930",
-            f"{y}1231",
-        ]
-        # 包含上一年，增加成功概率
-        py = y - 1
-        q_dates_prev = [
-            f"{py}1231",
-            f"{py}0930",
-            f"{py}0630",
-            f"{py}0331",
-        ]
-        # 近6期即可
-        return q_dates_prev + q_dates
-
-    candidates = quarter_ends(datetime.now())
+    candidates = _recent_report_periods(datetime.now())
     data_map: Dict[str, Dict[str, float]] = {}
 
-    for end_date in candidates:
+    try:
+        provider = get_tushare_provider()
+        api = provider.api
+        if api is None:
+            raise RuntimeError("Tushare API unavailable")
+
+        for end_date in candidates:
+            try:
+                fields = (
+                    "ts_code,end_date,roe,roe_waa,grossprofit_margin,netprofit_margin,"
+                    "debt_to_assets,or_yoy,netprofit_yoy,profit_dedt_yoy,dt_netprofit_yoy"
+                )
+                df = api.fina_indicator(end_date=end_date, fields=fields)
+                if df is not None and not df.empty:
+                    for _, row in df.iterrows():  # type: ignore
+                        ts_code = row.get("ts_code")
+                        if ts_code is None:
+                            continue
+                        metrics: Dict[str, float] = {
+                            "financial_indicator_period": str(row.get("end_date") or end_date)
+                        }
+                        for field in [
+                            "roe",
+                            "roe_waa",
+                            "grossprofit_margin",
+                            "netprofit_margin",
+                            "debt_to_assets",
+                            "or_yoy",
+                            "netprofit_yoy",
+                            "profit_dedt_yoy",
+                            "dt_netprofit_yoy",
+                        ]:
+                            value = _safe_float(row.get(field))
+                            if value is not None:
+                                metrics[field] = value
+                        if len(metrics) > 1:
+                            data_map[str(ts_code)] = metrics
+                    if data_map:
+                        return data_map  # 找到最近一期即可
+            except Exception as exc:
+                logger.warning("Tushare fina_indicator 获取 %s 失败: %s", end_date, exc)
+                continue
+    except Exception as exc:
+        logger.warning("Tushare 财务指标快照不可用，尝试 AkShare 降级: %s", exc)
+
+    return fetch_latest_akshare_indicator_map(candidates)
+
+
+def fetch_latest_akshare_indicator_map(candidates: list[str] | None = None) -> Dict[str, Dict[str, float]]:
+    """
+    使用 AkShare 东方财富业绩/资产负债表快照补充行业对比财务指标。
+
+    字段映射：
+    - 净资产收益率 -> roe
+    - 销售毛利率 -> grossprofit_margin
+    - 净利润 / 营业总收入 -> netprofit_margin
+    - 营业总收入-同比增长 -> or_yoy / revenue_yoy
+    - 净利润-同比增长 -> netprofit_yoy
+    - 资产负债率 -> debt_to_assets
+    """
+    import akshare as ak
+
+    data_map: Dict[str, Dict[str, float]] = {}
+    report_periods = candidates or _recent_report_periods(datetime.now())
+
+    for end_date in report_periods:
         try:
-            df = api.fina_indicator(end_date=end_date, fields="ts_code,end_date,roe")
-            if df is not None and not df.empty:
-                for _, row in df.iterrows():  # type: ignore
-                    ts_code = row.get("ts_code")
-                    val = row.get("roe")
-                    if ts_code is None or val is None:
-                        continue
-                    try:
-                        v = float(val)
-                    except Exception:
-                        continue
-                    data_map[str(ts_code)] = {"roe": v}
-                if data_map:
-                    break  # 找到最近一期即可
-        except Exception:
+            yjbb_df = ak.stock_yjbb_em(date=end_date)
+            if yjbb_df is None or yjbb_df.empty:
+                continue
+
+            for _, row in yjbb_df.iterrows():  # type: ignore
+                raw_code = row.get("股票代码")
+                code = str(raw_code or "").zfill(6)
+                if not code:
+                    continue
+                ts_code = f"{code}.SH" if code.startswith(("6", "9")) else f"{code}.SZ"
+                metrics: Dict[str, float] = {
+                    "financial_indicator_period": end_date,
+                    "financial_indicator_source": "akshare_stock_yjbb_em",
+                }
+
+                field_map = {
+                    "roe": row.get("净资产收益率"),
+                    "grossprofit_margin": row.get("销售毛利率"),
+                    "or_yoy": row.get("营业总收入-同比增长"),
+                    "revenue_yoy": row.get("营业总收入-同比增长"),
+                    "netprofit_yoy": row.get("净利润-同比增长"),
+                    "profit_dedt_yoy": row.get("净利润-同比增长"),
+                }
+                for field, raw_value in field_map.items():
+                    value = _safe_float(raw_value)
+                    if value is not None:
+                        metrics[field] = value
+
+                net_profit = _safe_float(row.get("净利润-净利润"))
+                revenue = _safe_float(row.get("营业总收入-营业总收入"))
+                if net_profit is not None and revenue not in (None, 0):
+                    metrics["netprofit_margin"] = net_profit / revenue * 100
+
+                if len(metrics) > 2:
+                    data_map[ts_code] = metrics
+
+            try:
+                balance_df = ak.stock_zcfz_em(date=end_date)
+                if balance_df is not None and not balance_df.empty:
+                    for _, row in balance_df.iterrows():  # type: ignore
+                        raw_code = row.get("股票代码")
+                        code = str(raw_code or "").zfill(6)
+                        if not code:
+                            continue
+                        ts_code = f"{code}.SH" if code.startswith(("6", "9")) else f"{code}.SZ"
+                        debt_to_assets = _safe_float(row.get("资产负债率"))
+                        if debt_to_assets is not None:
+                            data_map.setdefault(
+                                ts_code,
+                                {
+                                    "financial_indicator_period": end_date,
+                                    "financial_indicator_source": "akshare_stock_zcfz_em",
+                                },
+                            )
+                            data_map[ts_code]["debt_to_assets"] = debt_to_assets
+                            data_map[ts_code].setdefault("financial_indicator_source", "akshare_stock_yjbb_em")
+            except Exception as exc:
+                logger.warning("AkShare stock_zcfz_em 获取 %s 失败: %s", end_date, exc)
+
+            if data_map:
+                return data_map
+        except Exception as exc:
+            logger.warning("AkShare stock_yjbb_em 获取 %s 失败: %s", end_date, exc)
             continue
 
     return data_map

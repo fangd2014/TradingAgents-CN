@@ -7,9 +7,11 @@ from datetime import datetime, date, timedelta
 import pandas as pd
 import asyncio
 import logging
+import os
 
 from ..base_provider import BaseStockDataProvider
 from tradingagents.config.providers_config import get_provider_config
+from tradingagents.config.tushare_endpoint import configure_tushare_api_endpoint
 
 # 尝试导入tushare
 try:
@@ -33,9 +35,27 @@ class TushareProvider(BaseStockDataProvider):
         self.api = None
         self.config = get_provider_config("tushare")
         self.token_source = None  # 记录 Token 来源: 'database' 或 'env'
+        self._bridge_web_cookie_from_config()
 
         if not TUSHARE_AVAILABLE:
             self.logger.error("❌ Tushare库未安装，请运行: pip install tushare")
+
+    def _bridge_web_cookie_from_config(self) -> None:
+        """让新闻网页爬虫 fallback 可以使用数据源配置中的 Cookie。"""
+        web_cookie = self.config.get("web_cookie")
+        if web_cookie and not os.getenv("TUSHARE_WEB_COOKIE"):
+            os.environ["TUSHARE_WEB_COOKIE"] = str(web_cookie)
+
+    def _create_pro_api(self, timeout: Optional[int] = None, token: Optional[str] = None):
+        """创建 Tushare Pro API，并覆盖 SDK 默认端点。"""
+        configure_tushare_api_endpoint()
+        api = ts.pro_api(timeout=timeout or self.config.get("timeout", 30))
+        if token:
+            # The local Tushare proxy requires the SDK instance private token field.
+            setattr(api, "_DataApi__token", token)
+        api_url = configure_tushare_api_endpoint(api)
+        self.logger.info(f"🔌 Tushare API 端点: {api_url}")
+        return api
 
     def _get_token_from_database(self) -> Optional[str]:
         """
@@ -91,8 +111,7 @@ class TushareProvider(BaseStockDataProvider):
             self.logger.error("❌ Tushare库不可用")
             return False
 
-        # 测试连接超时时间（秒）- 只是测试连通性，不需要很长时间
-        test_timeout = 10
+        test_timeout = self._get_test_timeout()
 
         try:
             # 🔥 优先从数据库读取 Token
@@ -115,7 +134,7 @@ class TushareProvider(BaseStockDataProvider):
                 try:
                     self.logger.info(f"🔄 [步骤3] 尝试使用数据库中的 Tushare Token (超时: {test_timeout}秒)...")
                     ts.set_token(db_token)
-                    self.api = ts.pro_api()
+                    self.api = self._create_pro_api(timeout=test_timeout, token=db_token)
 
                     # 测试连接 - 直接调用同步方法（不使用 asyncio.run）
                     try:
@@ -141,7 +160,7 @@ class TushareProvider(BaseStockDataProvider):
                 try:
                     self.logger.info(f"🔄 [步骤4] 尝试使用 .env 中的 Tushare Token (超时: {test_timeout}秒)...")
                     ts.set_token(env_token)
-                    self.api = ts.pro_api()
+                    self.api = self._create_pro_api(timeout=test_timeout, token=env_token)
 
                     # 测试连接 - 直接调用同步方法（不使用 asyncio.run）
                     try:
@@ -178,8 +197,7 @@ class TushareProvider(BaseStockDataProvider):
             self.logger.error("❌ Tushare库不可用")
             return False
 
-        # 测试连接超时时间（秒）- 只是测试连通性，不需要很长时间
-        test_timeout = 10
+        test_timeout = self._get_test_timeout()
 
         try:
             # 🔥 优先从数据库读取 Token
@@ -191,7 +209,7 @@ class TushareProvider(BaseStockDataProvider):
                 try:
                     self.logger.info(f"🔄 尝试使用数据库中的 Tushare Token (超时: {test_timeout}秒)...")
                     ts.set_token(db_token)
-                    self.api = ts.pro_api()
+                    self.api = self._create_pro_api(timeout=test_timeout, token=db_token)
 
                     # 测试连接（异步）- 使用超时
                     try:
@@ -221,7 +239,7 @@ class TushareProvider(BaseStockDataProvider):
                 try:
                     self.logger.info(f"🔄 尝试使用 .env 中的 Tushare Token (超时: {test_timeout}秒)...")
                     ts.set_token(env_token)
-                    self.api = ts.pro_api()
+                    self.api = self._create_pro_api(timeout=test_timeout, token=env_token)
 
                     # 测试连接（异步）- 使用超时
                     try:
@@ -259,6 +277,14 @@ class TushareProvider(BaseStockDataProvider):
     def is_available(self) -> bool:
         """检查Tushare是否可用"""
         return TUSHARE_AVAILABLE and self.connected and self.api is not None
+
+    def _get_test_timeout(self) -> int:
+        """获取 Tushare 连接测试超时时间（秒）。"""
+        try:
+            timeout = int(self.config.get("timeout") or 30)
+        except (TypeError, ValueError):
+            timeout = 30
+        return max(timeout, 1)
     
     # ==================== 基础数据接口 ====================
     
@@ -604,7 +630,7 @@ class TushareProvider(BaseStockDataProvider):
             df = await asyncio.to_thread(
                 self.api.daily_basic,
                 trade_date=date_str,
-                fields='ts_code,total_mv,circ_mv,pe,pb,turnover_rate,volume_ratio,pe_ttm,pb_mrq'
+                fields='ts_code,total_mv,circ_mv,pe,pb,turnover_rate,volume_ratio,pe_ttm'
             )
             
             if df is not None and not df.empty:
@@ -618,30 +644,29 @@ class TushareProvider(BaseStockDataProvider):
             return None
     
     async def find_latest_trade_date(self) -> Optional[str]:
-        """查找最新交易日期"""
+        """通过 Tushare 交易日历查找上一个开市交易日"""
         if not self.is_available():
             return None
         
         try:
             today = datetime.now()
-            for delta in range(0, 10):  # 最多回溯10天
-                check_date = (today - timedelta(days=delta)).strftime('%Y%m%d')
-                
-                try:
-                    df = await asyncio.to_thread(
-                        self.api.daily_basic,
-                        trade_date=check_date,
-                        fields='ts_code',
-                        limit=1
-                    )
-                    
-                    if df is not None and not df.empty:
-                        formatted_date = f"{check_date[:4]}-{check_date[4:6]}-{check_date[6:8]}"
-                        self.logger.info(f"✅ 找到最新交易日期: {formatted_date}")
-                        return formatted_date
-                        
-                except Exception:
-                    continue
+            start_date = (today - timedelta(days=30)).strftime("%Y%m%d")
+            end_date = (today - timedelta(days=1)).strftime("%Y%m%d")
+            df = await asyncio.to_thread(
+                self.api.trade_cal,
+                exchange="SSE",
+                start_date=start_date,
+                end_date=end_date,
+                fields="cal_date,is_open",
+            )
+
+            if df is not None and not df.empty:
+                open_days = df[df["is_open"].astype(str) == "1"].copy()
+                if not open_days.empty:
+                    check_date = str(open_days["cal_date"].max())
+                    formatted_date = f"{check_date[:4]}-{check_date[4:6]}-{check_date[6:8]}"
+                    self.logger.info(f"✅ 从交易日历找到上一个交易日期: {formatted_date}")
+                    return formatted_date
             
             return None
             
@@ -796,11 +821,11 @@ class TushareProvider(BaseStockDataProvider):
 
             # 支持的新闻源列表（按优先级排序）
             news_sources = [
-                'sina',        # 新浪财经
                 'eastmoney',   # 东方财富
+                'sina',        # 新浪财经
+                'cls',         # 财联社
                 '10jqka',      # 同花顺
                 'wallstreetcn', # 华尔街见闻
-                'cls',         # 财联社
                 'yicai',       # 第一财经
                 'jinrongjie',  # 金融界
                 'yuncaijing',  # 云财经
@@ -858,7 +883,11 @@ class TushareProvider(BaseStockDataProvider):
                 self.logger.info(f"✅ Tushare新闻获取成功: {len(final_news)} 条（去重后）")
                 return final_news
             else:
-                self.logger.warning("⚠️ 未获取到任何Tushare新闻数据")
+                self.logger.warning("⚠️ Tushare Pro API 未获取到新闻，尝试 tushare.pro/news 网页爬虫降级")
+                web_news = self._get_tushare_web_news(symbol, hours_back, limit)
+                if web_news:
+                    self.logger.info(f"✅ Tushare网页新闻获取成功: {len(web_news)} 条")
+                    return web_news
                 return []
 
         except Exception as e:
@@ -869,7 +898,22 @@ class TushareProvider(BaseStockDataProvider):
                 self.logger.warning(f"⚠️ Tushare积分不足，无法获取新闻数据: {e}")
             else:
                 self.logger.error(f"❌ 获取Tushare新闻失败: {e}")
-            return None
+            web_news = self._get_tushare_web_news(symbol, hours_back, limit)
+            return web_news if web_news else None
+
+    def _get_tushare_web_news(self, symbol: str = None, hours_back: int = 24, limit: int = 10) -> List[Dict[str, Any]]:
+        """从 tushare.pro/news 网页爬虫获取新闻，作为 Tushare Pro API 降级来源。"""
+        try:
+            from tradingagents.dataflows.news.tushare_web import get_tushare_web_news
+
+            return get_tushare_web_news(
+                symbol=symbol,
+                limit=limit,
+                hours_back=hours_back,
+            )
+        except Exception as e:
+            self.logger.warning(f"⚠️ Tushare网页新闻爬虫不可用: {e}")
+            return []
 
     def _process_tushare_news(self, news_df: pd.DataFrame, source: str,
                             symbol: str = None, limit: int = 10) -> List[Dict[str, Any]]:
@@ -1595,15 +1639,7 @@ _tushare_provider_initialized = False
 
 def get_tushare_provider() -> TushareProvider:
     """获取全局Tushare提供器实例"""
-    global _tushare_provider, _tushare_provider_initialized
+    global _tushare_provider
     if _tushare_provider is None:
         _tushare_provider = TushareProvider()
-        # 使用同步连接方法，避免异步上下文问题
-        if not _tushare_provider_initialized:
-            try:
-                # 直接使用同步连接方法
-                _tushare_provider.connect_sync()
-                _tushare_provider_initialized = True
-            except Exception as e:
-                logger.warning(f"⚠️ Tushare自动连接失败: {e}")
     return _tushare_provider

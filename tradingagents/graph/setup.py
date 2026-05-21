@@ -47,6 +47,7 @@ class GraphSetup:
         conditional_logic: ConditionalLogic,
         config: Dict[str, Any] = None,
         react_llm = None,
+        role_llms: Dict[str, Any] = None,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
@@ -61,6 +62,10 @@ class GraphSetup:
         self.conditional_logic = conditional_logic
         self.config = config or {}
         self.react_llm = react_llm
+        self.role_llms = role_llms or {}
+
+    def _get_role_llm(self, role_name: str):
+        return self.role_llms.get(role_name) or self.quick_thinking_llm
 
     def setup_graph(
         self, selected_analysts=["market", "social", "news", "fundamentals"]
@@ -152,10 +157,10 @@ class GraphSetup:
 
         # Create researcher and manager nodes
         bull_researcher_node = create_bull_researcher(
-            self.quick_thinking_llm, self.bull_memory
+            self._get_role_llm("bull_researcher"), self.bull_memory
         )
         bear_researcher_node = create_bear_researcher(
-            self.quick_thinking_llm, self.bear_memory
+            self._get_role_llm("bear_researcher"), self.bear_memory
         )
         research_manager_node = create_research_manager(
             self.deep_thinking_llm, self.invest_judge_memory
@@ -163,9 +168,9 @@ class GraphSetup:
         trader_node = create_trader(self.quick_thinking_llm, self.trader_memory)
 
         # Create risk analysis nodes
-        risky_analyst = create_risky_debator(self.quick_thinking_llm)
+        risky_analyst = create_risky_debator(self._get_role_llm("risky_analyst"))
         neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        safe_analyst = create_safe_debator(self.quick_thinking_llm)
+        safe_analyst = create_safe_debator(self._get_role_llm("safe_analyst"))
         risk_manager_node = create_risk_manager(
             self.deep_thinking_llm, self.risk_manager_memory
         )

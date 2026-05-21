@@ -198,8 +198,23 @@ class StockDetailInsightService:
 
     async def _stock_basic(self, code6: str) -> Dict[str, Any]:
         collection = self.db["stock_basic_info"]
-        doc = await collection.find_one({"code": code6}, {"_id": 0})
-        return doc if isinstance(doc, dict) else {}
+        docs: List[Dict[str, Any]] = []
+        try:
+            cursor = collection.find({"code": code6}, {"_id": 0})
+            found = await cursor.to_list(length=None)
+            docs = [doc for doc in (found or []) if isinstance(doc, dict)]
+        except Exception:
+            docs = []
+
+        if not docs:
+            doc = await collection.find_one({"code": code6}, {"_id": 0})
+            return doc if isinstance(doc, dict) else {}
+
+        return min(docs, key=self._stock_basic_priority)
+
+    def _stock_basic_priority(self, doc: Dict[str, Any]) -> tuple:
+        has_industry = bool(str(doc.get("industry") or "").strip())
+        return (0 if has_industry else 1, self._source_priority(doc.get("source")))
 
     async def _industry_codes_async(self, industry: str) -> List[str]:
         hook = getattr(self, "_industry_codes", None)
@@ -235,6 +250,33 @@ class StockDetailInsightService:
                 seen.add(code)
                 codes.append(code)
         return codes
+
+    def _best_basic_doc_by_code(self, docs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        by_code: Dict[str, Dict[str, Any]] = {}
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            code = normalize_code6(doc.get("code") or doc.get("symbol") or doc.get("ts_code") or "")
+            if not code:
+                continue
+            selected = by_code.get(code)
+            if selected is None or self._stock_basic_priority(doc) < self._stock_basic_priority(selected):
+                by_code[code] = doc
+        return by_code
+
+    async def _basic_docs_for_codes(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
+        normalized_codes = {normalize_code6(code) for code in codes if code}
+        if not normalized_codes:
+            return {}
+
+        collection = self.db["stock_basic_info"]
+        cursor = collection.find(
+            {"code": {"$in": list(normalized_codes)}},
+            {"_id": 0},
+        )
+        docs = await cursor.to_list(length=None)
+        docs = docs if isinstance(docs, list) else []
+        return self._best_basic_doc_by_code(docs)
 
     async def _financial_docs_for_codes(
         self,
@@ -288,6 +330,36 @@ class StockDetailInsightService:
         deduped = list(by_symbol.values())
         deduped.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
         return deduped
+
+    async def _comparison_docs_for_codes(
+        self,
+        codes: List[str],
+        period: str = "latest",
+    ) -> List[Dict[str, Any]]:
+        normalized_codes = {normalize_code6(code) for code in codes if code}
+        financial_docs = await self._financial_docs_for_codes(list(normalized_codes), period=period)
+        basic_docs = await self._basic_docs_for_codes(list(normalized_codes))
+        by_code: Dict[str, Dict[str, Any]] = {}
+
+        for code, basic_doc in basic_docs.items():
+            doc = dict(basic_doc)
+            doc["_code6"] = code
+            by_code[code] = doc
+
+        for financial_doc in financial_docs:
+            code = normalize_code6(
+                financial_doc.get("symbol") or financial_doc.get("code") or financial_doc.get("_code6") or ""
+            )
+            if not code:
+                continue
+            merged = dict(by_code.get(code, {}))
+            merged.update(financial_doc)
+            merged["_code6"] = code
+            by_code[code] = merged
+
+        docs = [doc for code, doc in by_code.items() if code in normalized_codes]
+        docs.sort(key=lambda item: (str(item.get("report_period") or ""), item.get("_code6", "")), reverse=True)
+        return docs
 
     @staticmethod
     def _source_priority(source: Any) -> int:
@@ -397,7 +469,7 @@ class StockDetailInsightService:
         industry_codes = await self._industry_codes_async(industry)
         if code6 not in industry_codes:
             industry_codes.append(code6)
-        docs = await self._financial_docs_for_codes(industry_codes, period=period)
+        docs = await self._comparison_docs_for_codes(industry_codes, period=period)
         sample_count = len(docs)
 
         stock_doc: Optional[Dict[str, Any]] = None

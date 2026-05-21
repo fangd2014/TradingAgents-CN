@@ -54,7 +54,9 @@ class DatabaseManager:
             "port": int(os.getenv("MONGODB_PORT", "27017")),
             "username": os.getenv("MONGODB_USERNAME"),
             "password": os.getenv("MONGODB_PASSWORD"),
-            "database": os.getenv("MONGODB_DATABASE", "tradingagents"),
+            "database": os.getenv("MONGODB_DATABASE", "").strip()
+            or os.getenv("MONGODB_DATABASE_NAME", "").strip()
+            or "tradingagents",
             "auth_source": os.getenv("MONGODB_AUTH_SOURCE", "admin"),
             "timeout": 2000,
             # MongoDB超时参数（毫秒）- 用于处理大量历史数据

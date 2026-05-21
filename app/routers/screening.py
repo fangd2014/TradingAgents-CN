@@ -1,12 +1,18 @@
 
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+import time
+import uuid
+import asyncio
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from app.routers.auth_db import get_current_user
 
 from app.services.screening_service import ScreeningService, ScreeningParams
 from app.services.enhanced_screening_service import get_enhanced_screening_service
+from app.services.preset_screening_service import get_preset_screening_service
+from app.services.custom_strategy_screening_service import get_custom_strategy_screening_service
 from app.models.screening import (
     ScreeningCondition, ScreeningRequest as NewScreeningRequest,
     ScreeningResponse as NewScreeningResponse, FieldInfo, BASIC_FIELDS_INFO
@@ -39,9 +45,322 @@ class ScreeningResponse(BaseModel):
     total: int
     items: List[dict]
 
+class PresetTrendStartRequest(BaseModel):
+    limit: int = Field(50, ge=1, le=200, description="返回数量")
+    candidate_limit: int = Field(300, ge=20, le=1000, description="候选股票扫描数量")
+    industries: Optional[List[str]] = Field(None, description="可选行业过滤")
+    float_cap_limit: float = Field(500, gt=0, le=5000, description="流通市值上限，单位亿元")
+    min_five_day_turnover: float = Field(5, ge=0, le=100, description="上一交易日 turnover_rate_f 下限，单位%")
+    volume_breakout_multiplier: float = Field(4, ge=1, le=20, description="放量上涨倍数阈值")
+
+class StrategyTaskRequest(BaseModel):
+    strategy_id: str = Field(..., description="策略ID")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="策略参数")
+    title: Optional[str] = Field(None, description="任务标题")
+    strategy_text: Optional[str] = Field(None, description="自定义策略文本")
+
 # 服务实例
 svc = ScreeningService()
 enhanced_svc = get_enhanced_screening_service()
+preset_svc = get_preset_screening_service()
+custom_strategy_svc = get_custom_strategy_screening_service()
+
+
+def _number_field(
+    key: str,
+    label: str,
+    default: float,
+    min_value: float,
+    max_value: float,
+    step: float,
+    unit: str = "",
+    precision: Optional[int] = None,
+) -> Dict[str, Any]:
+    field = {
+        "key": key,
+        "label": label,
+        "component": "number",
+        "default": default,
+        "min": min_value,
+        "max": max_value,
+        "step": step,
+        "unit": unit,
+    }
+    if precision is not None:
+        field["precision"] = precision
+    return field
+
+
+SCREENING_STRATEGIES: List[Dict[str, Any]] = [
+    {
+        "id": "trend_start",
+        "name": "中高回落+缩量横盘",
+        "description": "寻找高位回落后缩量横盘，并在近期开启放量上涨的A股机会。",
+        "tags": ["冲高回落", "缩量横盘", "放量启动", "筹码控盘"],
+        "fields": [
+            {"key": "industries", "label": "行业范围", "component": "industry-select", "multiple": True, "default": []},
+            _number_field("limit", "结果数量", 100, 1, 200, 10, "只"),
+            _number_field("candidate_limit", "候选扫描", 500, 20, 1000, 20, "只"),
+            _number_field("float_cap_limit", "流通市值上限", 500, 50, 5000, 50, "亿元"),
+            _number_field("min_five_day_turnover", "上一交易日换手", 5, 0, 100, 1, "%"),
+            _number_field("volume_breakout_multiplier", "放量倍数", 4, 1, 20, 0.5, "倍", 1),
+        ],
+    },
+    {
+        "id": "low_valuation_quality",
+        "name": "低估值高ROE",
+        "description": "以估值、ROE和市值约束筛选基本面质量较好的标的。",
+        "tags": ["低估值", "高ROE", "基本面"],
+        "fields": [
+            {"key": "industries", "label": "行业范围", "component": "industry-select", "multiple": True, "default": []},
+            _number_field("limit", "结果数量", 100, 1, 500, 10, "只"),
+            _number_field("max_pe", "PE上限", 25, 0, 200, 1, "倍"),
+            _number_field("max_pb", "PB上限", 3, 0, 20, 0.1, "倍", 2),
+            _number_field("min_roe", "ROE下限", 10, 0, 100, 1, "%"),
+            _number_field("max_total_mv", "总市值上限", 2000, 50, 10000, 50, "亿元"),
+        ],
+    },
+    {
+        "id": "active_volume",
+        "name": "放量活跃股",
+        "description": "从成交额、换手率和涨跌幅中筛选短线活跃标的。",
+        "tags": ["成交活跃", "换手率", "短线"],
+        "fields": [
+            {"key": "industries", "label": "行业范围", "component": "industry-select", "multiple": True, "default": []},
+            _number_field("limit", "结果数量", 100, 1, 500, 10, "只"),
+            _number_field("min_amount", "成交额下限", 5, 0, 200, 1, "亿元"),
+            _number_field("min_turnover", "换手率下限", 3, 0, 100, 1, "%"),
+            _number_field("min_pct_chg", "涨跌幅下限", -3, -20, 20, 0.5, "%", 1),
+            _number_field("max_pct_chg", "涨跌幅上限", 9.8, -20, 20, 0.5, "%", 1),
+        ],
+    },
+    {
+        "id": "custom_strategy",
+        "name": "自定义策略",
+        "description": "输入自然语言或公式，由 DeepSeek 转换为受控 DSL 后解释执行。",
+        "tags": ["自定义", "DeepSeek生成DSL", "受控执行"],
+        "fields": [
+            {"key": "industries", "label": "行业范围", "component": "industry-select", "multiple": True, "default": []},
+            _number_field("limit", "结果数量", 100, 1, 200, 10, "只"),
+            _number_field("candidate_limit", "候选扫描", 500, 20, 1000, 20, "只"),
+        ],
+    },
+]
+
+
+def _strategy_by_id(strategy_id: str) -> Optional[Dict[str, Any]]:
+    return next((strategy for strategy in SCREENING_STRATEGIES if strategy["id"] == strategy_id), None)
+
+
+def _condition(field: str, op: str, value: Any) -> Dict[str, Any]:
+    return {"field": field, "op": op, "value": value}
+
+
+def _manual_task_parameters(req: ScreeningRequest) -> Dict[str, Any]:
+    return {
+        "market": req.market,
+        "date": req.date,
+        "adj": req.adj,
+        "conditions": req.conditions,
+        "order_by": [item.model_dump() for item in (req.order_by or [])],
+        "limit": req.limit,
+        "offset": req.offset,
+    }
+
+
+async def _execute_legacy_screening(parameters: Dict[str, Any]) -> Dict[str, Any]:
+    conditions = _convert_legacy_conditions_to_new_format(parameters.get("conditions", {}))
+    result = await enhanced_svc.screen_stocks(
+        conditions=conditions,
+        market=parameters.get("market", "CN"),
+        date=parameters.get("date"),
+        adj=parameters.get("adj", "qfq"),
+        limit=int(parameters.get("limit") or 100),
+        offset=int(parameters.get("offset") or 0),
+        order_by=parameters.get("order_by") or [],
+        use_database_optimization=True,
+    )
+    return {
+        "preset": "manual_indicators",
+        "title": "指标选股",
+        "description": ["按页面配置的指标条件筛选股票。"],
+        "total": result.get("total", 0),
+        "items": result.get("items", []),
+        "took_ms": result.get("took_ms"),
+        "trace": {
+            "parameters": parameters,
+            "optimization_used": result.get("optimization_used"),
+            "source": result.get("source"),
+        },
+    }
+
+
+async def _execute_strategy(strategy_id: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    if strategy_id == "manual_indicators":
+        return await _execute_legacy_screening(parameters)
+
+    if strategy_id == "trend_start":
+        return await preset_svc.run_trend_start_preset(
+            limit=int(parameters.get("limit") or 100),
+            candidate_limit=int(parameters.get("candidate_limit") or 500),
+            industries=parameters.get("industries") or None,
+            float_cap_limit=float(parameters.get("float_cap_limit") or 500),
+            min_five_day_turnover=float(parameters.get("min_five_day_turnover") or 5),
+            volume_breakout_multiplier=float(parameters.get("volume_breakout_multiplier") or 4),
+        )
+
+    if strategy_id == "custom_strategy":
+        return await custom_strategy_svc.run_custom_strategy(
+            strategy_text=str(parameters.get("strategy_text") or ""),
+            limit=int(parameters.get("limit") or 100),
+            candidate_limit=int(parameters.get("candidate_limit") or 500),
+            industries=parameters.get("industries") or None,
+        )
+
+    children: List[Dict[str, Any]] = []
+    industries = parameters.get("industries") or []
+    if industries:
+        children.append(_condition("industry", "in", industries))
+
+    if strategy_id == "low_valuation_quality":
+        children.extend([
+            _condition("pe", "between", [0, float(parameters.get("max_pe") or 25)]),
+            _condition("pb", "between", [0, float(parameters.get("max_pb") or 3)]),
+            _condition("roe", "gte", float(parameters.get("min_roe") or 10)),
+            _condition("market_cap", "between", [0, float(parameters.get("max_total_mv") or 2000) * 10000]),
+        ])
+        order_by = [{"field": "roe", "direction": "desc"}]
+    elif strategy_id == "active_volume":
+        min_amount_yi = float(parameters.get("min_amount") or 5)
+        children.extend([
+            _condition("amount", "gte", min_amount_yi * 100000000),
+            _condition("turnover_rate", "gte", float(parameters.get("min_turnover") or 3)),
+            _condition("pct_chg", "between", [
+                float(parameters.get("min_pct_chg") if parameters.get("min_pct_chg") is not None else -3),
+                float(parameters.get("max_pct_chg") if parameters.get("max_pct_chg") is not None else 9.8),
+            ]),
+        ])
+        order_by = [{"field": "amount", "direction": "desc"}]
+    else:
+        raise ValueError(f"未知选股策略: {strategy_id}")
+
+    result = await _execute_legacy_screening({
+        "market": "CN",
+        "date": None,
+        "adj": "qfq",
+        "conditions": {"logic": "AND", "children": children},
+        "order_by": order_by,
+        "limit": int(parameters.get("limit") or 100),
+        "offset": 0,
+    })
+    strategy = _strategy_by_id(strategy_id) or {"name": strategy_id, "description": []}
+    result.update({
+        "preset": strategy_id,
+        "title": strategy["name"],
+        "description": [strategy.get("description", "")],
+    })
+    result["trace"]["parameters"] = parameters
+    return result
+
+
+def _build_saved_screening_result(
+    task_id: str,
+    strategy_id: str,
+    strategy_name: str,
+    parameters: Dict[str, Any],
+    raw_result: Dict[str, Any],
+    execution_time: float,
+) -> Dict[str, Any]:
+    total = int(raw_result.get("total") or len(raw_result.get("items", [])))
+    summary = f"选股完成，命中 {total} 只股票。"
+    return {
+        "type": "screening",
+        "analysis_id": task_id,
+        "stock_symbol": "SCREENING",
+        "stock_code": "SCREENING",
+        "analysis_date": datetime.utcnow().isoformat(),
+        "summary": summary,
+        "recommendation": f"策略：{strategy_name}。结果已保存，可在任务中心随时查看。",
+        "confidence_score": 0,
+        "risk_level": "中等",
+        "key_points": [
+            f"策略：{strategy_name}",
+            f"命中数量：{total}",
+            f"参数：{parameters}",
+        ],
+        "execution_time": execution_time,
+        "tokens_used": 0,
+        "analysts": ["screening"],
+        "research_depth": "选股",
+        "reports": {},
+        "screening": {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_name,
+            "parameters": parameters,
+            "total": total,
+            "items": raw_result.get("items", []),
+            "trace": raw_result.get("trace"),
+            "description": raw_result.get("description", []),
+            "took_ms": raw_result.get("took_ms"),
+        },
+    }
+
+
+async def _run_screening_task(task_id: str, strategy_id: str, strategy_name: str, parameters: Dict[str, Any]) -> None:
+    from app.core.database import get_mongo_db
+
+    db = get_mongo_db()
+    started = time.time()
+    try:
+        await db.analysis_tasks.update_one(
+            {"task_id": task_id},
+            {"$set": {
+                "status": "running",
+                "progress": 20,
+                "message": "正在执行选股策略",
+                "current_step": "screening",
+                "started_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }},
+        )
+
+        raw_result = await _execute_strategy(strategy_id, parameters)
+        execution_time = round(time.time() - started, 3)
+        saved_result = _build_saved_screening_result(
+            task_id=task_id,
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            parameters=parameters,
+            raw_result=raw_result,
+            execution_time=execution_time,
+        )
+        await db.analysis_tasks.update_one(
+            {"task_id": task_id},
+            {"$set": {
+                "status": "completed",
+                "progress": 100,
+                "message": f"选股完成，命中 {saved_result['screening']['total']} 只股票",
+                "current_step": "completed",
+                "result": saved_result,
+                "execution_time": execution_time,
+                "completed_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }},
+        )
+    except Exception as exc:
+        logger.error("[screening_task] 任务失败: task_id=%s error=%s", task_id, exc, exc_info=True)
+        await db.analysis_tasks.update_one(
+            {"task_id": task_id},
+            {"$set": {
+                "status": "failed",
+                "progress": 100,
+                "message": f"选股失败: {exc}",
+                "error_message": str(exc),
+                "current_step": "failed",
+                "completed_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }},
+        )
 
 
 @router.get("/fields", response_model=FieldConfigResponse)
@@ -69,6 +388,130 @@ async def get_screening_fields(user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"[get_screening_fields] 获取字段配置失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/strategies", response_model=Dict[str, Any])
+async def get_screening_strategies(user: dict = Depends(get_current_user)):
+    """获取可用策略选股配置。"""
+    return {
+        "strategies": SCREENING_STRATEGIES,
+        "default_strategy_id": "trend_start",
+    }
+
+
+@router.post("/tasks", response_model=Dict[str, Any])
+async def create_strategy_screening_task(
+    req: StrategyTaskRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """创建策略选股任务，结果保存到任务中心。"""
+    strategy = _strategy_by_id(req.strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=400, detail=f"未知选股策略: {req.strategy_id}")
+
+    task_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    title = req.title or f"策略选股：{strategy['name']}"
+    parameters = req.parameters or {}
+    if req.strategy_id == "custom_strategy":
+        parameters = dict(parameters)
+        parameters["strategy_text"] = req.strategy_text or parameters.get("strategy_text") or ""
+        if not parameters["strategy_text"].strip():
+            raise HTTPException(status_code=400, detail="自定义策略文本不能为空")
+
+    try:
+        from app.core.database import get_mongo_db
+
+        db = get_mongo_db()
+        await db.analysis_tasks.insert_one({
+            "task_id": task_id,
+            "user_id": user["id"],
+            "task_type": "screening",
+            "screening_type": "strategy",
+            "strategy_id": req.strategy_id,
+            "strategy_name": strategy["name"],
+            "title": title,
+            "stock_code": "SCREENING",
+            "stock_symbol": "SCREENING",
+            "stock_name": strategy["name"],
+            "status": "running",
+            "progress": 1,
+            "message": "选股任务已创建，准备执行",
+            "current_step": "queued",
+            "parameters": parameters,
+            "created_at": now,
+            "updated_at": now,
+        })
+    except Exception as exc:
+        logger.error("[screening_task] 创建任务失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"创建选股任务失败: {exc}")
+
+    background_tasks.add_task(_run_screening_task, task_id, req.strategy_id, strategy["name"], parameters)
+    return {
+        "success": True,
+        "data": {
+            "task_id": task_id,
+            "status": "pending",
+            "task_type": "screening",
+            "strategy_id": req.strategy_id,
+            "strategy_name": strategy["name"],
+        },
+        "message": "选股任务已添加到任务中心",
+    }
+
+
+@router.post("/tasks/indicators", response_model=Dict[str, Any])
+async def create_indicator_screening_task(
+    req: ScreeningRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """创建指标选股任务，结果保存到任务中心。"""
+    task_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    parameters = _manual_task_parameters(req)
+    strategy_name = "指标选股"
+
+    try:
+        from app.core.database import get_mongo_db
+
+        db = get_mongo_db()
+        await db.analysis_tasks.insert_one({
+            "task_id": task_id,
+            "user_id": user["id"],
+            "task_type": "screening",
+            "screening_type": "indicators",
+            "strategy_id": "manual_indicators",
+            "strategy_name": strategy_name,
+            "title": strategy_name,
+            "stock_code": "SCREENING",
+            "stock_symbol": "SCREENING",
+            "stock_name": strategy_name,
+            "status": "running",
+            "progress": 1,
+            "message": "指标选股任务已创建，准备执行",
+            "current_step": "queued",
+            "parameters": parameters,
+            "created_at": now,
+            "updated_at": now,
+        })
+    except Exception as exc:
+        logger.error("[screening_task] 创建指标选股任务失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"创建指标选股任务失败: {exc}")
+
+    background_tasks.add_task(_run_screening_task, task_id, "manual_indicators", strategy_name, parameters)
+    return {
+        "success": True,
+        "data": {
+            "task_id": task_id,
+            "status": "pending",
+            "task_type": "screening",
+            "strategy_id": "manual_indicators",
+            "strategy_name": strategy_name,
+        },
+        "message": "指标选股任务已添加到任务中心",
+    }
 
 
 def _convert_legacy_conditions_to_new_format(legacy_conditions: Dict[str, Any]) -> List[ScreeningCondition]:
@@ -187,6 +630,43 @@ async def run_screening(req: ScreeningRequest, user: dict = Depends(get_current_
     except Exception as e:
         logger.error(f"[screening] 处理失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preset/trend-start", response_model=Dict[str, Any])
+async def run_trend_start_preset(
+    req: PresetTrendStartRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    运行“横盘放量启动”预设条件选股。
+
+    预设条件来自 docs/选股逻辑.md，聚合放量启动、上一交易日自由流通换手、
+    量价健康、小市值和热点行业方向，返回最近5日基础摘要。
+    """
+    try:
+        logger.info(
+            "[preset_screening] trend_start 请求: limit=%s candidate_limit=%s industries=%s",
+            req.limit,
+            req.candidate_limit,
+            req.industries,
+        )
+        result = await preset_svc.run_trend_start_preset(
+            limit=req.limit,
+            candidate_limit=req.candidate_limit,
+            industries=req.industries,
+            float_cap_limit=req.float_cap_limit,
+            min_five_day_turnover=req.min_five_day_turnover,
+            volume_breakout_multiplier=req.volume_breakout_multiplier,
+        )
+        logger.info(
+            "[preset_screening] trend_start 完成: total=%s took=%sms",
+            result.get("total"),
+            result.get("took_ms"),
+        )
+        return result
+    except Exception as e:
+        logger.error("[preset_screening] trend_start 失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"预设条件选股失败: {str(e)}")
 
 
 # 新的优化筛选接口

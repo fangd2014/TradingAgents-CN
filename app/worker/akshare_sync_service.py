@@ -723,21 +723,9 @@ class AKShareSyncService:
                         return latest_date
                 else:
                     # 🔥 没有历史数据时，从上市日期开始全量同步
-                    stock_info = await self.db.stock_basic_info.find_one(
-                        {"code": symbol},
-                        {"list_date": 1}
-                    )
-                    if stock_info and stock_info.get("list_date"):
-                        list_date = stock_info["list_date"]
-                        # 处理不同的日期格式
-                        if isinstance(list_date, str):
-                            # 格式可能是 "20100101" 或 "2010-01-01"
-                            if len(list_date) == 8 and list_date.isdigit():
-                                return f"{list_date[:4]}-{list_date[4:6]}-{list_date[6:]}"
-                            else:
-                                return list_date
-                        else:
-                            return list_date.strftime('%Y-%m-%d')
+                    list_date = await self._get_stock_list_date(symbol)
+                    if list_date:
+                        return list_date
 
                     # 如果没有上市日期，从1990年开始
                     logger.warning(f"⚠️ {symbol}: 未找到上市日期，从1990-01-01开始同步")
@@ -750,6 +738,53 @@ class AKShareSyncService:
             logger.error(f"❌ 获取最后同步日期失败 {symbol}: {e}")
             # 出错时返回30天前，确保不漏数据
             return (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+
+    async def _get_stock_list_date(self, symbol: str) -> Optional[str]:
+        """Return the first valid list date for a stock, preferring Tushare basics.
+
+        stock_basic_info can contain one row per data source. AKShare rows often
+        have an empty list_date, so a plain find_one({"code": symbol}) may hit
+        the empty row and incorrectly fall back to 1990-01-01.
+        """
+        cursor = self.db.stock_basic_info.find(
+            {
+                "code": str(symbol).zfill(6),
+                "list_date": {"$exists": True, "$nin": [None, ""]},
+            },
+            {"list_date": 1, "source": 1},
+        )
+        candidates = await cursor.to_list(length=10)
+        candidates.sort(key=lambda doc: 0 if doc.get("source") == "tushare" else 1)
+
+        for stock_info in candidates:
+            list_date = self._format_list_date(stock_info.get("list_date"))
+            if list_date:
+                return list_date
+        return None
+
+    @staticmethod
+    def _format_list_date(list_date: Any) -> Optional[str]:
+        """Normalize list_date values like 20110908 or datetime to YYYY-MM-DD."""
+        if not list_date:
+            return None
+
+        if isinstance(list_date, str):
+            value = list_date.strip()
+            if not value:
+                return None
+            if len(value) == 8 and value.isdigit():
+                return f"{value[:4]}-{value[4:6]}-{value[6:]}"
+            return value
+
+        if isinstance(list_date, (int, float)):
+            value = str(int(list_date))
+            if len(value) == 8:
+                return f"{value[:4]}-{value[4:6]}-{value[6:]}"
+
+        if hasattr(list_date, "strftime"):
+            return list_date.strftime('%Y-%m-%d')
+
+        return None
 
     async def sync_financial_data(self, symbols: List[str] = None) -> Dict[str, Any]:
         """

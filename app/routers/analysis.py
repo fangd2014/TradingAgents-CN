@@ -15,8 +15,9 @@ import asyncio
 from app.routers.auth_db import get_current_user
 from app.services.queue_service import get_queue_service, QueueService
 from app.services.analysis_service import get_analysis_service
-from app.services.simple_analysis_service import get_simple_analysis_service
+from app.services.simple_analysis_service import get_simple_analysis_service, resolve_stock_input_for_analysis
 from app.services.websocket_manager import get_websocket_manager
+from app.utils.analysis_result_payload import build_task_result_payload
 from app.models.analysis import (
     SingleAnalysisRequest, BatchAnalysisRequest, AnalysisParameters,
     AnalysisTaskResponse, AnalysisBatchResponse, AnalysisHistoryQuery
@@ -311,32 +312,41 @@ async def get_task_result(
                 if tasks_doc and tasks_doc.get("result"):
                     r = tasks_doc["result"] or {}
                     logger.info("✅ [RESULT] 从analysis_tasks.result 找到结果")
-                    # 获取股票代码 (优先使用symbol)
-                    symbol = (tasks_doc.get("symbol") or tasks_doc.get("stock_code") or
-                             r.get("stock_symbol") or r.get("stock_code"))
-                    result_data = {
-                        "analysis_id": r.get("analysis_id"),
-                        "stock_symbol": symbol,
-                        "stock_code": symbol,  # 兼容字段
-                        "analysis_date": r.get("analysis_date"),
-                        "summary": r.get("summary", ""),
-                        "recommendation": r.get("recommendation", ""),
-                        "confidence_score": r.get("confidence_score", 0.0),
-                        "risk_level": r.get("risk_level", "中等"),
-                        "key_points": r.get("key_points", []),
-                        "execution_time": r.get("execution_time", 0),
-                        "tokens_used": r.get("tokens_used", 0),
-                        "analysts": r.get("analysts", []),
-                        "research_depth": r.get("research_depth", "快速"),
-                        "reports": r.get("reports", {}),
-                        "state": r.get("state", {}),
-                        "detailed_analysis": r.get("detailed_analysis", {}),
-                        "created_at": tasks_doc.get("created_at"),
-                        "updated_at": tasks_doc.get("completed_at"),
-                        "status": r.get("status", "completed"),
-                        "decision": r.get("decision", {}),
-                        "source": "analysis_tasks"  # 数据来源标记
-                    }
+                    if r.get("type") == "screening" or isinstance(r.get("screening"), dict):
+                        result_data = {
+                            **r,
+                            "created_at": tasks_doc.get("created_at"),
+                            "updated_at": tasks_doc.get("completed_at"),
+                            "status": r.get("status", "completed"),
+                            "source": "analysis_tasks",
+                        }
+                    else:
+                        # 获取股票代码 (优先使用symbol)
+                        symbol = (tasks_doc.get("symbol") or tasks_doc.get("stock_code") or
+                                 r.get("stock_symbol") or r.get("stock_code"))
+                        result_data = {
+                            "analysis_id": r.get("analysis_id"),
+                            "stock_symbol": symbol,
+                            "stock_code": symbol,  # 兼容字段
+                            "analysis_date": r.get("analysis_date"),
+                            "summary": r.get("summary", ""),
+                            "recommendation": r.get("recommendation", ""),
+                            "confidence_score": r.get("confidence_score", 0.0),
+                            "risk_level": r.get("risk_level", "中等"),
+                            "key_points": r.get("key_points", []),
+                            "execution_time": r.get("execution_time", 0),
+                            "tokens_used": r.get("tokens_used", 0),
+                            "analysts": r.get("analysts", []),
+                            "research_depth": r.get("research_depth", "快速"),
+                            "reports": r.get("reports", {}),
+                            "state": r.get("state", {}),
+                            "detailed_analysis": r.get("detailed_analysis", {}),
+                            "created_at": tasks_doc.get("created_at"),
+                            "updated_at": tasks_doc.get("completed_at"),
+                            "status": r.get("status", "completed"),
+                            "decision": r.get("decision", {}),
+                            "source": "analysis_tasks"  # 数据来源标记
+                        }
 
         if not result_data:
             logger.warning(f"❌ [RESULT] 所有数据源都未找到结果: {task_id}")
@@ -641,46 +651,7 @@ async def get_task_result(
         if result_data.get('decision'):
             logger.info(f"🔍 [FINAL] decision内容: {result_data['decision']}")
 
-        # 构建严格验证的结果数据
-        final_result_data = {
-            "analysis_id": safe_string(result_data.get("analysis_id"), "unknown"),
-            "stock_symbol": safe_string(result_data.get("stock_symbol"), "UNKNOWN"),
-            "stock_code": safe_string(result_data.get("stock_code"), "UNKNOWN"),
-            "analysis_date": safe_string(result_data.get("analysis_date"), "2025-08-20"),
-            "summary": safe_string(result_data.get("summary"), "分析摘要暂无"),
-            "recommendation": safe_string(result_data.get("recommendation"), "投资建议暂无"),
-            "confidence_score": safe_number(result_data.get("confidence_score"), 0.0),
-            "risk_level": safe_string(result_data.get("risk_level"), "中等"),
-            "key_points": safe_list(result_data.get("key_points")),
-            "execution_time": safe_number(result_data.get("execution_time"), 0),
-            "tokens_used": safe_number(result_data.get("tokens_used"), 0),
-            "analysts": safe_list(result_data.get("analysts")),
-            "research_depth": safe_string(result_data.get("research_depth"), "快速"),
-            "detailed_analysis": safe_dict(result_data.get("detailed_analysis")),
-            "state": safe_dict(result_data.get("state")),
-            # 🔥 关键修复：添加decision字段！
-            "decision": safe_dict(result_data.get("decision"))
-        }
-
-        # 特别处理reports字段 - 确保每个报告都是有效字符串
-        reports_data = safe_dict(result_data.get("reports"))
-        validated_reports = {}
-
-        for report_key, report_content in reports_data.items():
-            # 确保报告键是字符串
-            safe_key = safe_string(report_key, "unknown_report")
-
-            # 确保报告内容是非空字符串
-            if report_content is None:
-                validated_content = "报告内容暂无"
-            elif isinstance(report_content, str):
-                validated_content = report_content.strip() if report_content.strip() else "报告内容为空"
-            else:
-                validated_content = str(report_content).strip() if str(report_content).strip() else "报告内容格式错误"
-
-            validated_reports[safe_key] = validated_content
-
-        final_result_data["reports"] = validated_reports
+        final_result_data = build_task_result_payload(result_data)
 
         logger.info(f"✅ [RESULT] 成功获取任务结果: {task_id}")
         logger.info(f"📊 [RESULT] 最终返回 {len(final_result_data.get('reports', {}))} 个报告")
@@ -787,12 +758,27 @@ async def submit_batch_analysis(
         mapping: List[Dict[str, str]] = []
 
         # 获取股票代码列表 (兼容旧字段)
-        stock_symbols = request.get_symbols()
-        logger.info(f"📊 [批量分析] 股票代码列表: {stock_symbols}")
+        stock_inputs = request.get_symbols()
+        logger.info(f"📊 [批量分析] 股票输入列表: {stock_inputs}")
 
         # 验证股票代码列表
-        if not stock_symbols:
+        if not stock_inputs:
             raise ValueError("股票代码列表不能为空")
+
+        stock_symbols: List[str] = []
+        stock_names: Dict[str, str] = {}
+        for stock_input in stock_inputs:
+            resolved = await resolve_stock_input_for_analysis(
+                stock_input,
+                request.parameters.market_type if request.parameters else None,
+            )
+            symbol = resolved["symbol"] or stock_input
+            stock_symbols.append(symbol)
+            if resolved.get("name"):
+                stock_names[symbol] = resolved["name"]
+
+        stock_symbols = list(dict.fromkeys(stock_symbols))
+        logger.info(f"📊 [批量分析] 解析后股票代码列表: {stock_symbols}")
 
         # 🔧 限制批量分析的股票数量（最多10个）
         MAX_BATCH_SIZE = 10
@@ -806,6 +792,7 @@ async def submit_batch_analysis(
             single_req = SingleAnalysisRequest(
                 symbol=symbol,
                 stock_code=symbol,  # 兼容字段
+                stock_name=stock_names.get(symbol),
                 parameters=request.parameters
             )
 
@@ -831,6 +818,7 @@ async def submit_batch_analysis(
                 single_req = SingleAnalysisRequest(
                     symbol=symbol,
                     stock_code=symbol,
+                    stock_name=stock_names.get(symbol),
                     parameters=request.parameters
                 )
 

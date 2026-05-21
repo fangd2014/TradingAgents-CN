@@ -297,11 +297,11 @@ class BasicsSyncService:
                 for field in ["pe", "pb", "ps", "pe_ttm", "pb_mrq", "ps_ttm"]:
                     if field in daily_metrics:
                         doc[field] = daily_metrics[field]
-                # ROE from fina_indicator snapshot
+                # Financial indicator snapshot from fina_indicator.
                 if isinstance(ts_code, str) and ts_code in roe_map:
-                    roe_val = roe_map[ts_code].get("roe")
-                    if roe_val is not None:
-                        doc["roe"] = roe_val
+                    for field, value in roe_map[ts_code].items():
+                        if value is not None:
+                            doc[field] = value
 
                 # Add trading metrics
                 for field in ["turnover_rate", "volume_ratio"]:
@@ -416,4 +416,3 @@ def get_basics_sync_service() -> BasicsSyncService:
     if _basics_sync_service is None:
         _basics_sync_service = BasicsSyncService()
     return _basics_sync_service
-

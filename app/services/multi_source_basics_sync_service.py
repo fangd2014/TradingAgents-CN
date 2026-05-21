@@ -204,6 +204,17 @@ class MultiSourceBasicsSyncService:
                             daily_data_map[ts_code] = row.to_dict()
                     stats.data_sources_used.append(f"daily_data:{daily_source}")
 
+            indicator_map = {}
+            if not preferred_sources or "tushare" in preferred_sources:
+                try:
+                    from app.services.basics_sync import fetch_latest_roe_map
+
+                    indicator_map = await asyncio.to_thread(fetch_latest_roe_map)
+                    if indicator_map:
+                        stats.data_sources_used.append("financial_indicator:tushare")
+                except Exception as exc:
+                    logger.warning(f"⚠️ Tushare 财务指标快照获取失败，跳过补充: {exc}")
+
             # Step 5: 处理和更新数据（分批处理）
             ops = []
             inserted = updated = errors = 0
@@ -248,6 +259,8 @@ class MultiSourceBasicsSyncService:
                     daily_metrics = {}
                     if isinstance(ts_code, str) and ts_code in daily_data_map:
                         daily_metrics = daily_data_map[ts_code]
+                    if isinstance(ts_code, str) and ts_code in indicator_map:
+                        daily_metrics = {**daily_metrics, **indicator_map[ts_code]}
 
                     # 生成 full_symbol（确保不为空）
                     full_symbol = ts_code if ts_code else self._generate_full_symbol(code)

@@ -24,6 +24,12 @@ def get_stock_detail_insight_service():
     return StockDetailInsightService(db=get_mongo_db())
 
 
+def get_stock_shareholder_service():
+    from app.services.stock_shareholder_service import StockShareholderService
+
+    return StockShareholderService(db=get_mongo_db())
+
+
 def _zfill_code(code: str) -> str:
     try:
         s = str(code).strip()
@@ -32,6 +38,20 @@ def _zfill_code(code: str) -> str:
         return s.zfill(6)
     except Exception:
         return str(code)
+
+
+def _is_china_etf_code(code: str) -> bool:
+    try:
+        from tradingagents.utils.stock_utils import StockUtils
+        return StockUtils.is_china_etf(code)
+    except Exception:
+        code_text = str(code or "").strip()
+        return len(code_text) == 6 and (
+            code_text.startswith("159")
+            or code_text.startswith("51")
+            or code_text.startswith("56")
+            or code_text.startswith("58")
+        )
 
 
 def _detect_market_and_code(code: str) -> Tuple[str, str]:
@@ -105,6 +125,19 @@ async def get_technical_factors(
     return ok(data=data)
 
 
+@router.get("/{code}/shareholders", response_model=dict)
+async def get_shareholders(
+    code: str,
+    scope: str = Query("top10", pattern="^(top10|float_top10)$", description="股东范围：top10 或 float_top10"),
+    periods: int = Query(4, ge=1, le=12, description="返回最近多少期"),
+    refresh: bool = Query(False, description="是否强制刷新外部数据源"),
+    current_user: dict = Depends(get_current_user),
+):
+    service = get_stock_shareholder_service()
+    data = await service.get_shareholders(code, scope=scope, periods=periods, refresh=refresh)
+    return ok(data=data)
+
+
 @router.get("/{code}/quote", response_model=dict)
 async def get_quote(
     code: str,
@@ -149,12 +182,22 @@ async def get_quote(
                 detail=f"获取行情失败: {str(e)}"
             )
 
-    # A股：使用现有逻辑
+    # A股/A股ETF：使用现有逻辑，ETF 缺库时走专用行情兜底
     db = get_mongo_db()
     code6 = normalized_code
+    is_china_etf = _is_china_etf_code(code6)
 
     # 行情
     q = await db["market_quotes"].find_one({"code": code6}, {"_id": 0})
+    if not q and is_china_etf:
+        try:
+            from app.services.quotes_service import get_quotes_service
+            online_quotes = await get_quotes_service().get_quotes([code6])
+            q = online_quotes.get(code6)
+            if q:
+                logger.info(f"✅ ETF {code6} 使用 AKShare ETF 在线行情兜底")
+        except Exception as e:
+            logger.warning(f"⚠️ ETF {code6} 在线行情兜底失败: {e}")
 
     # 🔥 调试日志：查看查询结果
     logger.info(f"🔍 查询 market_quotes: code={code6}")
@@ -232,8 +275,9 @@ async def get_quote(
 
     data = {
         "code": code6,
-        "name": (b or {}).get("name"),
-        "market": (b or {}).get("market"),
+        "name": (b or {}).get("name") or (q or {}).get("name"),
+        "market": "A股ETF" if is_china_etf else (b or {}).get("market"),
+        "instrument_type": "etf" if is_china_etf else "stock",
         "price": close,
         "change_percent": pct,
         "amount": (q or {}).get("amount"),
@@ -296,6 +340,37 @@ async def get_fundamentals(
     # A股：使用现有逻辑
     db = get_mongo_db()
     code6 = normalized_code
+    if _is_china_etf_code(code6):
+        try:
+            from app.services.quotes_service import get_quotes_service
+            quote = (await get_quotes_service().get_quotes([code6])).get(code6, {})
+            return ok(data={
+                "code": code6,
+                "name": quote.get("name") or f"ETF{code6}",
+                "industry": "ETF",
+                "market": "A股ETF",
+                "sector": "ETF",
+                "pe": None,
+                "pb": None,
+                "pe_ttm": None,
+                "pb_mrq": None,
+                "ps": None,
+                "ps_ttm": None,
+                "pe_source": "not_applicable",
+                "pe_is_realtime": False,
+                "pe_updated_at": None,
+                "roe": None,
+                "debt_ratio": None,
+                "total_mv": None,
+                "circ_mv": None,
+                "mv_is_realtime": False,
+                "turnover_rate": None,
+                "volume_ratio": None,
+                "instrument_type": "etf",
+                "updated_at": None,
+            })
+        except Exception as e:
+            logger.warning(f"⚠️ 获取ETF {code6} 基础信息失败: {e}")
 
     # 1. 获取基础信息（支持数据源筛选）
     query = {"code": code6}
@@ -516,6 +591,40 @@ async def get_kline(
 
     # A股：使用现有逻辑
     code_padded = normalized_code
+    if _is_china_etf_code(code_padded):
+        try:
+            from datetime import datetime, timedelta
+            import asyncio
+            from tradingagents.dataflows.providers.china.etf import get_china_etf_history_dataframe
+
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=limit * 2)).strftime("%Y-%m-%d")
+            df = await asyncio.to_thread(get_china_etf_history_dataframe, code_padded, start_date, end_date)
+            items = []
+            if df is not None and not df.empty:
+                for _, row in df.tail(limit).iterrows():
+                    date_value = row.get("date")
+                    items.append({
+                        "time": date_value.strftime("%Y-%m-%d") if hasattr(date_value, "strftime") else str(date_value or ""),
+                        "open": float(row.get("open", 0) or 0),
+                        "high": float(row.get("high", 0) or 0),
+                        "low": float(row.get("low", 0) or 0),
+                        "close": float(row.get("close", 0) or 0),
+                        "volume": float(row.get("vol", 0) or 0),
+                        "amount": float(row.get("amount", 0) or 0) if row.get("amount") is not None else None,
+                    })
+            return ok(data={
+                "code": code_padded,
+                "period": period,
+                "limit": limit,
+                "adj": adj if adj else "none",
+                "source": "akshare_etf",
+                "items": items,
+            })
+        except Exception as e:
+            logger.error(f"❌ 获取ETF K线失败: {e}")
+            raise HTTPException(status_code=500, detail=f"获取ETF K线数据失败: {str(e)}")
+
     adj_norm = None if adj in (None, "none", "", "null") else adj
     items = None
     source = None
@@ -569,25 +678,13 @@ async def get_kline(
     except Exception as e:
         logger.warning(f"⚠️ MongoDB 获取 K 线失败: {e}")
 
-    # 2. 如果 MongoDB 没有数据，降级到外部 API（带超时保护）
+    # 2. A股历史K线只读 MongoDB，缺数据时提示先执行预热/同步。
     if not items:
-        logger.info(f"📡 MongoDB 无数据，降级到外部 API")
-        try:
-            import asyncio
-            from app.services.data_sources.manager import DataSourceManager
-
-            mgr = DataSourceManager()
-            # 添加 10 秒超时保护
-            items, source = await asyncio.wait_for(
-                asyncio.to_thread(mgr.get_kline_with_fallback, code_padded, period, limit, adj_norm),
-                timeout=10.0
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"❌ 外部 API 获取 K 线超时（10秒）")
-            raise HTTPException(status_code=504, detail="获取K线数据超时，请稍后重试")
-        except Exception as e:
-            logger.error(f"❌ 外部 API 获取 K 线失败: {e}")
-            raise HTTPException(status_code=500, detail=f"获取K线数据失败: {str(e)}")
+        logger.warning(f"⚠️ MongoDB 中未找到 K 线数据: {code_padded}, period={mongodb_period}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"MongoDB中未找到股票 {code_padded} 的历史K线数据，请先执行A股全量数据预热或单股同步"
+        )
 
     # 🔥 3. 检查是否需要添加当天实时数据（仅针对日线）
     if period == "day" and items:
@@ -789,4 +886,3 @@ async def get_news(code: str, days: int = 30, limit: int = 50, include_announcem
                 "items": []
             }
             return ok(data)
-

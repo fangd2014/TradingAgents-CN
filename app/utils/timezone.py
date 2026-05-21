@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
 
 from app.core.config import settings
+
+
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+
+
+def _valid_timezone_name(name: str) -> str:
+    try:
+        ZoneInfo(name)
+        return name
+    except Exception:
+        return DEFAULT_TIMEZONE
 
 
 def get_tz_name() -> str:
@@ -22,7 +35,18 @@ def get_tz_name() -> str:
                 return tz.strip()
     except Exception:
         pass
-    return settings.TIMEZONE or "Asia/Shanghai"
+    for env_key in ("APP_TIMEZONE", "TIMEZONE", "TA_TIMEZONE", "TZ"):
+        env_value = os.getenv(env_key)
+        if isinstance(env_value, str) and env_value.strip():
+            return _valid_timezone_name(env_value.strip())
+
+    configured = settings.TIMEZONE or DEFAULT_TIMEZONE
+    return _valid_timezone_name(configured)
+
+
+def get_timezone_name() -> str:
+    """Compatibility alias used by backend callers."""
+    return get_tz_name()
 
 
 def get_tz() -> ZoneInfo:
@@ -55,3 +79,11 @@ def ensure_timezone(dt: Optional[datetime]) -> Optional[datetime]:
         return dt.replace(tzinfo=get_tz())
     return dt
 
+
+def apply_process_timezone(timezone_name: Optional[str] = None) -> str:
+    """Apply configured timezone to the process for naive datetime.now()."""
+    tz_name = _valid_timezone_name((timezone_name or get_tz_name()).strip())
+    os.environ["TZ"] = tz_name
+    if hasattr(time, "tzset"):
+        time.tzset()
+    return tz_name

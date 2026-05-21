@@ -125,6 +125,109 @@
           </div>
         </el-card>
 
+        <el-card shadow="hover" class="shareholders-card" id="stock-shareholders">
+          <template #header>
+            <div class="card-hd">
+              <div>股东结构</div>
+              <div class="shareholder-tools">
+                <el-select v-model="selectedShareholderPeriod" size="small" placeholder="报告期" style="width: 140px">
+                  <el-option
+                    v-for="periodItem in shareholderPeriods"
+                    :key="periodItem"
+                    :label="periodItem"
+                    :value="periodItem"
+                  />
+                </el-select>
+                <el-button text size="small" :icon="Refresh" :loading="shareholderLoading" @click="refreshShareholders">刷新</el-button>
+              </div>
+            </div>
+          </template>
+
+          <el-tabs v-model="shareholderScope">
+            <el-tab-pane label="前十大股东" name="top10" />
+            <el-tab-pane label="前十大流通股东" name="float_top10" />
+          </el-tabs>
+
+          <el-alert v-if="shareholderError" type="warning" :title="shareholderError" show-icon />
+          <el-skeleton v-else-if="shareholderLoading" :rows="5" animated />
+          <template v-else-if="shareholdersData">
+            <div class="shareholder-overview">
+              <div class="shareholder-meta">
+                <span>来源：{{ shareholdersData.source || '-' }}</span>
+                <span>最新期：{{ shareholdersData.latest_period || '-' }}</span>
+                <span>对比期：{{ shareholdersData.previous_period || '-' }}</span>
+                <span>更新时间：{{ shareholdersData.last_updated || '-' }}</span>
+                <el-tag v-if="shareholdersData.is_cached" size="small" type="info">缓存</el-tag>
+                <el-tag v-if="shareholdersData.warning" size="small" type="warning">{{ shareholdersData.warning }}</el-tag>
+              </div>
+              <div class="shareholder-summary">
+                <div class="shareholder-summary-item">
+                  <span>新增</span>
+                  <strong>{{ shareholdersData.changes?.new_count || 0 }}</strong>
+                </div>
+                <div class="shareholder-summary-item">
+                  <span>退出</span>
+                  <strong>{{ shareholdersData.changes?.exited_count || 0 }}</strong>
+                </div>
+                <div class="shareholder-summary-item">
+                  <span>增持</span>
+                  <strong>{{ shareholdersData.changes?.increased_count || 0 }}</strong>
+                </div>
+                <div class="shareholder-summary-item">
+                  <span>减持</span>
+                  <strong>{{ shareholdersData.changes?.decreased_count || 0 }}</strong>
+                </div>
+                <div class="shareholder-summary-item">
+                  <span>排名变化</span>
+                  <strong>{{ shareholdersData.changes?.rank_changed_count || 0 }}</strong>
+                </div>
+              </div>
+            </div>
+            <el-table :data="selectedShareholderRows" size="small" height="300">
+              <el-table-column prop="rank" label="排名" width="70" />
+              <el-table-column prop="holder_name" label="股东名称" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="hold_amount" label="持股数量">
+                <template #default="{ row }">{{ fmtVolume(row.hold_amount) }}</template>
+              </el-table-column>
+              <el-table-column prop="hold_ratio" label="持股比例">
+                <template #default="{ row }">{{ fmtUnsignedPercent(row.hold_ratio) }}</template>
+              </el-table-column>
+              <el-table-column prop="hold_change" label="本期变化">
+                <template #default="{ row }">{{ fmtSignedNumber(row.hold_change) }}</template>
+              </el-table-column>
+              <el-table-column prop="rank_change" label="排名变化" width="100">
+                <template #default="{ row }">{{ formatRankChange(row.rank_change) }}</template>
+              </el-table-column>
+              <el-table-column prop="change_type" label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="shareholderChangeTagType(row.change_type)">
+                    {{ shareholderChangeLabel(row.change_type) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <el-collapse v-if="shareholdersData.history?.length" class="shareholder-history">
+              <el-collapse-item title="最近多期历史" name="history">
+                <div v-for="periodBlock in shareholdersData.history" :key="periodBlock.period" class="history-block">
+                  <div class="history-title">{{ periodBlock.period }}</div>
+                  <el-table :data="periodBlock.items" size="small">
+                    <el-table-column prop="rank" label="排名" width="70" />
+                    <el-table-column prop="holder_name" label="股东名称" min-width="220" show-overflow-tooltip />
+                    <el-table-column prop="hold_amount" label="持股数量">
+                      <template #default="{ row }">{{ fmtVolume(row.hold_amount) }}</template>
+                    </el-table-column>
+                    <el-table-column prop="hold_ratio" label="持股比例">
+                      <template #default="{ row }">{{ fmtUnsignedPercent(row.hold_ratio) }}</template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </template>
+          <el-empty v-else description="暂无股东结构数据" />
+        </el-card>
+
         <el-card shadow="hover" class="insights-card" id="stock-detail-insights">
           <template #header>
             <div class="card-hd">
@@ -155,27 +258,48 @@
                 </el-descriptions>
                 <el-tabs class="statement-tabs">
                   <el-tab-pane label="利润表">
-                    <el-table :data="financialDetail.income_statement || []" size="small" height="260">
+                    <v-chart class="statement-chart" :option="incomeStatementChartOption" autoresize />
+                    <el-table :data="incomeStatementRows" size="small" height="260">
                       <el-table-column prop="end_date" label="报告期" width="110" />
-                      <el-table-column prop="revenue" label="营业收入" />
-                      <el-table-column prop="n_income_attr_p" label="归母净利润" />
-                      <el-table-column prop="oper_profit" label="营业利润" />
+                      <el-table-column prop="revenue" label="营业收入(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.revenue) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="n_income_attr_p" label="归母净利润(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.n_income_attr_p) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="oper_profit" label="营业利润(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.oper_profit) }}</template>
+                      </el-table-column>
                     </el-table>
                   </el-tab-pane>
                   <el-tab-pane label="资产负债表">
-                    <el-table :data="financialDetail.balance_sheet || []" size="small" height="260">
+                    <v-chart class="statement-chart" :option="balanceSheetChartOption" autoresize />
+                    <el-table :data="balanceSheetRows" size="small" height="260">
                       <el-table-column prop="end_date" label="报告期" width="110" />
-                      <el-table-column prop="total_assets" label="总资产" />
-                      <el-table-column prop="total_liab" label="总负债" />
-                      <el-table-column prop="money_cap" label="货币资金" />
+                      <el-table-column prop="total_assets" label="总资产(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.total_assets) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="total_liab" label="总负债(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.total_liab) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="money_cap" label="货币资金(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.money_cap) }}</template>
+                      </el-table-column>
                     </el-table>
                   </el-tab-pane>
                   <el-tab-pane label="现金流量表">
-                    <el-table :data="financialDetail.cashflow_statement || []" size="small" height="260">
+                    <v-chart class="statement-chart" :option="cashflowStatementChartOption" autoresize />
+                    <el-table :data="cashflowStatementRows" size="small" height="260">
                       <el-table-column prop="end_date" label="报告期" width="110" />
-                      <el-table-column prop="n_cashflow_act" label="经营现金流" />
-                      <el-table-column prop="n_cashflow_inv_act" label="投资现金流" />
-                      <el-table-column prop="n_cashflow_fin_act" label="筹资现金流" />
+                      <el-table-column prop="n_cashflow_act" label="经营现金流(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.n_cashflow_act) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="n_cashflow_inv_act" label="投资现金流(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.n_cashflow_inv_act) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="n_cashflow_fin_act" label="筹资现金流(亿元)">
+                        <template #default="{ row }">{{ fmtYi(row.n_cashflow_fin_act) }}</template>
+                      </el-table-column>
                     </el-table>
                   </el-tab-pane>
                   <el-tab-pane label="主营业务">
@@ -484,14 +608,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { TrendCharts, Star, Refresh, Link, Document, Clock, Reading, CreditCard, Delete } from '@element-plus/icons-vue'
 import { marked } from 'marked'
-import { stocksApi } from '@/api/stocks'
+import { stocksApi, type ShareholderScope, type ShareholdersResponse } from '@/api/stocks'
 import { analysisApi } from '@/api/analysis'
 import { ApiClient } from '@/api/request'
 import { stockSyncApi } from '@/api/stockSync'
 import { clearAllCache } from '@/api/cache'
 import { targetForInsightShortcut, type StockDetailInsightShortcut, type StockDetailInsightTab } from './detailInsightShortcuts'
 import { use as echartsUse } from 'echarts/core'
-import { CandlestickChart } from 'echarts/charts'
+import { BarChart, CandlestickChart } from 'echarts/charts'
 
 import { GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, TitleComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -500,7 +624,7 @@ import type { EChartsOption } from 'echarts'
 import { favoritesApi } from '@/api/favorites'
 
 
-echartsUse([CandlestickChart, GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, TitleComponent, CanvasRenderer])
+echartsUse([BarChart, CandlestickChart, GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, TitleComponent, CanvasRenderer])
 
 const route = useRoute()
 const router = useRouter()
@@ -578,6 +702,13 @@ const technicalFactors = ref<any | null>(null)
 const insightLoading = reactive({ financial: false, industry: false, technical: false })
 const insightError = reactive({ financial: '', industry: '', technical: '' })
 const loadedInsightTabs = reactive({ financial: false, industry: false, technical: false })
+const shareholderScope = ref<ShareholderScope>('top10')
+const shareholdersData = ref<ShareholdersResponse | null>(null)
+const shareholderLoading = ref(false)
+const shareholderError = ref('')
+const loadedShareholderScopes = reactive<Record<ShareholderScope, boolean>>({ top10: false, float_top10: false })
+const shareholderCache = reactive<Record<ShareholderScope, ShareholdersResponse | null>>({ top10: null, float_top10: null })
+const selectedShareholderPeriod = ref('')
 
 const industryMetricLabels: Record<string, string> = {
   pe: 'PE',
@@ -621,6 +752,52 @@ const technicalFactorRows = computed(() => {
     ...(value || {})
   }))
 })
+
+const shareholderPeriods = computed(() => {
+  return (shareholdersData.value?.history || []).map(item => item.period)
+})
+
+const selectedShareholderRows = computed(() => {
+  const data = shareholdersData.value
+  if (!data) return []
+  const selectedPeriod = selectedShareholderPeriod.value || data.latest_period
+  const periodBlock = data.history?.find(item => item.period === selectedPeriod)
+  if (!periodBlock || selectedPeriod === data.latest_period) {
+    return data.latest || []
+  }
+  return periodBlock.items || []
+})
+
+const incomeStatementRows = computed(() => recentTenYearStatementRows(financialDetail.value?.income_statement || []))
+const balanceSheetRows = computed(() => recentTenYearStatementRows(financialDetail.value?.balance_sheet || []))
+const cashflowStatementRows = computed(() => recentTenYearStatementRows(financialDetail.value?.cashflow_statement || []))
+
+const incomeStatementChartOption = computed<EChartsOption>(() => buildStatementBarOption(
+  incomeStatementRows.value,
+  [
+    { key: 'revenue', name: '营业收入' },
+    { key: 'n_income_attr_p', name: '归母净利润' },
+    { key: 'oper_profit', name: '营业利润' }
+  ]
+))
+
+const balanceSheetChartOption = computed<EChartsOption>(() => buildStatementBarOption(
+  balanceSheetRows.value,
+  [
+    { key: 'total_assets', name: '总资产' },
+    { key: 'total_liab', name: '总负债' },
+    { key: 'money_cap', name: '货币资金' }
+  ]
+))
+
+const cashflowStatementChartOption = computed<EChartsOption>(() => buildStatementBarOption(
+  cashflowStatementRows.value,
+  [
+    { key: 'n_cashflow_act', name: '经营现金流' },
+    { key: 'n_cashflow_inv_act', name: '投资现金流' },
+    { key: 'n_cashflow_fin_act', name: '筹资现金流' }
+  ]
+))
 
 // 报价（初始化）
 const quote = reactive({
@@ -943,6 +1120,34 @@ async function loadTechnicalFactors(refresh = false) {
   }
 }
 
+async function loadShareholders(refresh = false) {
+  const scope = shareholderScope.value
+  if (!refresh && loadedShareholderScopes[scope] && shareholderCache[scope]) {
+    shareholdersData.value = shareholderCache[scope]
+    selectedShareholderPeriod.value = shareholdersData.value?.latest_period || ''
+    return
+  }
+
+  shareholderLoading.value = true
+  shareholderError.value = ''
+  try {
+    const res = await stocksApi.getShareholders(code.value, scope, 4, refresh)
+    const data = (res as any)?.data || null
+    shareholdersData.value = data
+    shareholderCache[scope] = data
+    loadedShareholderScopes[scope] = true
+    selectedShareholderPeriod.value = data?.latest_period || ''
+  } catch (error: any) {
+    shareholderError.value = error?.message || '股东结构加载失败'
+  } finally {
+    shareholderLoading.value = false
+  }
+}
+
+async function refreshShareholders() {
+  await loadShareholders(true)
+}
+
 async function ensureInsightTabLoaded(tab: StockDetailInsightTab) {
   if (tab === 'financial' && (!loadedInsightTabs.financial || !financialDetail.value)) await loadFinancialDetail()
   if (tab === 'industry' && (!loadedInsightTabs.industry || !industryComparison.value)) await loadIndustryComparison()
@@ -986,6 +1191,7 @@ async function loadPageData() {
     fetchSyncStatus()  // 获取同步状态
   ])
   await ensureInsightTabLoaded(insightTab.value)
+  await loadShareholders()
 }
 
 function resetPageState() {
@@ -1005,12 +1211,20 @@ function resetPageState() {
   financialDetail.value = null
   industryComparison.value = null
   technicalFactors.value = null
+  shareholdersData.value = null
+  shareholderCache.top10 = null
+  shareholderCache.float_top10 = null
+  shareholderScope.value = 'top10'
+  selectedShareholderPeriod.value = ''
   insightError.financial = ''
   insightError.industry = ''
   insightError.technical = ''
+  shareholderError.value = ''
   loadedInsightTabs.financial = false
   loadedInsightTabs.industry = false
   loadedInsightTabs.technical = false
+  loadedShareholderScopes.top10 = false
+  loadedShareholderScopes.float_top10 = false
 }
 
 onMounted(async () => {
@@ -1032,6 +1246,10 @@ watch(() => route.params.code, async (newCode, oldCode) => {
 
 watch(insightTab, (tab) => {
   ensureInsightTabLoaded(tab)
+})
+
+watch(shareholderScope, () => {
+  loadShareholders()
 })
 
 
@@ -1285,9 +1503,102 @@ function fmtAmount(v: any) {
   if (n >= 1e4) return (n/1e4).toFixed(2) + '万'
   return n.toFixed(0)
 }
+function toYi(v: any) {
+  const n = Number(v)
+  return Number.isFinite(n) ? Number((n / 1e8).toFixed(2)) : null
+}
+function fmtYi(v: any) {
+  const n = toYi(v)
+  return n === null ? '-' : n.toFixed(2)
+}
 function fmtNumber(v: any) {
+  if (v === null || v === undefined || v === '') return '-'
   const n = Number(v)
   return Number.isFinite(n) ? n.toFixed(2) : '-'
+}
+function parseStatementYear(row: any) {
+  const year = Number(String(row?.end_date || '').slice(0, 4))
+  return Number.isFinite(year) ? year : null
+}
+function sortedStatementRows(rows: any[]) {
+  return [...(rows || [])].sort((a, b) => String(a?.end_date || '').localeCompare(String(b?.end_date || '')))
+}
+function recentTenYearStatementRows(rows: any[]) {
+  const sortedDesc = [...(rows || [])].sort((a, b) => String(b?.end_date || '').localeCompare(String(a?.end_date || '')))
+  const latestYear = sortedDesc.map(parseStatementYear).find((year): year is number => year !== null)
+  if (!latestYear) return sortedDesc.slice(0, 40)
+  const startYear = latestYear - 9
+  return sortedDesc.filter(row => {
+    const year = parseStatementYear(row)
+    return year === null || year >= startYear
+  })
+}
+function buildStatementBarOption(rows: any[], metrics: Array<{ key: string; name: string }>): EChartsOption {
+  const orderedRows = sortedStatementRows(rows)
+  return {
+    color: ['#409eff', '#67c23a', '#e6a23c'],
+    grid: { left: 54, right: 20, top: 42, bottom: 48 },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      valueFormatter: (value: any) => {
+        const n = Number(value)
+        return Number.isFinite(n) ? `${n.toFixed(2)}亿元` : '-'
+      }
+    },
+    legend: { top: 0, left: 0 },
+    xAxis: {
+      type: 'category',
+      data: orderedRows.map(row => row?.end_date || '-'),
+      axisLabel: { rotate: 30 }
+    },
+    yAxis: {
+      type: 'value',
+      name: '亿元'
+    },
+    series: metrics.map(metric => ({
+      name: metric.name,
+      type: 'bar',
+      data: orderedRows.map(row => toYi(row?.[metric.key])),
+      barMaxWidth: 26
+    }))
+  }
+}
+function fmtUnsignedPercent(v: any) {
+  const n = Number(v)
+  return Number.isFinite(n) ? `${n.toFixed(2)}%` : '-'
+}
+function fmtSignedNumber(v: any) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  return `${n > 0 ? '+' : ''}${n.toFixed(2)}`
+}
+function formatRankChange(v: any) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return '-'
+  return n > 0 ? `上升${n}` : `下降${Math.abs(n)}`
+}
+function shareholderChangeLabel(type: string | undefined) {
+  const labels: Record<string, string> = {
+    new: '新增',
+    exited: '退出',
+    increased: '增持',
+    decreased: '减持',
+    unchanged: '持平',
+    no_previous: '无对比期'
+  }
+  return labels[type || ''] || '-'
+}
+function shareholderChangeTagType(type: string | undefined) {
+  const types: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'primary'> = {
+    new: 'success',
+    exited: 'info',
+    increased: 'danger',
+    decreased: 'success',
+    unchanged: 'info',
+    no_previous: 'warning'
+  }
+  return types[type || ''] || 'info'
 }
 function formatFactorValue(row: any) {
   if (row.latest !== undefined) return fmtNumber(row.latest)
@@ -1520,7 +1831,63 @@ function exportReport() {
 
 .insights-card { margin-top: 16px; }
 .insight-meta { color: var(--el-text-color-secondary); font-size: 13px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.shareholder-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.shareholder-meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.shareholder-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+}
+.shareholder-summary-item {
+  min-width: 0;
+  padding: 8px 10px;
+  text-align: center;
+  border-left: 1px solid var(--el-border-color-lighter);
+}
+.shareholder-summary-item:first-child { border-left: none; }
+.shareholder-summary-item span {
+  display: block;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.shareholder-summary-item strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--el-text-color-primary);
+  font-size: 20px;
+  line-height: 1.1;
+  font-weight: 600;
+}
 .statement-tabs { margin-top: 12px; }
+.statement-chart {
+  width: 100%;
+  height: 260px;
+  margin-bottom: 12px;
+}
 .magic-nine-section { margin-bottom: 16px; }
 .magic-nine-section h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
 .factor-table { margin-top: 12px; }
@@ -1553,6 +1920,8 @@ function exportReport() {
 
 @media (max-width: 1024px) {
   .stats { grid-template-columns: repeat(4, 1fr); }
+  .shareholder-summary { grid-template-columns: repeat(5, minmax(52px, 1fr)); }
+  .shareholder-summary-item { padding: 8px 6px; }
 }
 
 /* 报告相关样式 */

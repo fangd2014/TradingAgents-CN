@@ -34,10 +34,7 @@ export function formatDateTime(
       timeStr = String(dateStr).trim()
     }
 
-    // 检查时间字符串是否包含时区信息
-    const hasTimezone = timeStr.endsWith('Z') ||
-                       timeStr.includes('+') ||
-                       timeStr.includes('-', 10) // 日期后面的 - 才是时区标识
+    const hasTimezone = hasExplicitTimezone(timeStr)
 
     // 🔥 如果没有时区标识，假定为 UTC+8 时间（后端已经入库为 UTC+8），添加 +08:00 后缀
     // 注意：如果后端已经返回了带时区的时间（如 +08:00 或 Z），这里不会修改
@@ -100,7 +97,7 @@ export function formatDateTimeWithRelative(dateStr: string | number | null | und
     }
     
     // 🔥 如果时间字符串没有时区标识，假定为 UTC+8 时间（后端已经入库为 UTC+8），添加 +08:00 后缀
-    if (timeStr.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/) && !timeStr.endsWith('Z') && !timeStr.includes('+') && !timeStr.includes('-', 10)) {
+    if (timeStr.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/) && !hasExplicitTimezone(timeStr)) {
       timeStr += '+08:00'
     }
     
@@ -200,7 +197,7 @@ export function formatRelativeTime(dateStr: string | number | null | undefined):
     }
 
     // 🔥 如果时间字符串没有时区标识，假定为 UTC+8 时间（后端已经入库为 UTC+8），添加 +08:00 后缀
-    if (timeStr.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/) && !timeStr.endsWith('Z') && !timeStr.includes('+') && !timeStr.includes('-', 10)) {
+    if (timeStr.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/) && !hasExplicitTimezone(timeStr)) {
       timeStr += '+08:00'
     }
 
@@ -243,4 +240,8 @@ export function formatRelativeTime(dateStr: string | number | null | undefined):
     console.error('相对时间格式化错误:', e, dateStr)
     return String(dateStr)
   }
+}
+
+function hasExplicitTimezone(timeStr: string): boolean {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/.test(timeStr)
 }

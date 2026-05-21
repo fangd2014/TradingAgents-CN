@@ -129,6 +129,17 @@ def _sanitize_datasource_configs(items):
         result = []
         for item in items:
             data = item.model_dump()
+            ds_type = data.get("type")
+
+            try:
+                from app.utils.datasource_sensitive_config import sanitize_sensitive_config_params
+
+                data["config_params"] = sanitize_sensitive_config_params(
+                    ds_type,
+                    data.get("config_params") or {},
+                )
+            except Exception as e:
+                logger.warning(f"数据源扩展配置脱敏失败: {e}")
 
             # 处理 API Key
             db_key = data.get("api_key")
@@ -137,7 +148,6 @@ def _sanitize_datasource_configs(items):
                 data["api_key"] = truncate_api_key(db_key)
             else:
                 # 数据库中没有有效的 API Key，尝试从环境变量读取
-                ds_type = data.get("type")
                 if isinstance(ds_type, str):
                     env_key = get_env_api_key_for_datasource(ds_type)
                     if env_key:
@@ -766,6 +776,15 @@ async def add_data_source_config(
         from app.utils.api_key_utils import should_skip_api_key_update, is_valid_api_key
 
         _req = request.model_dump()
+        try:
+            from app.utils.datasource_sensitive_config import normalize_sensitive_config_params
+
+            _req["config_params"] = normalize_sensitive_config_params(
+                _req.get("type"),
+                _req.get("config_params") or {},
+            )
+        except Exception as e:
+            logger.warning(f"数据源敏感扩展配置规范化失败: {e}")
 
         # 处理 API Key
         if 'api_key' in _req:
@@ -804,6 +823,13 @@ async def add_data_source_config(
 
         success = await config_service.save_system_config(config)
         if success:
+            try:
+                from app.utils.datasource_sensitive_config import bridge_sensitive_config_params_to_env
+
+                bridge_sensitive_config_params_to_env(ds_config.type, ds_config.config_params)
+            except Exception as e:
+                logger.warning(f"数据源敏感扩展配置桥接失败: {e}")
+
             # 🆕 自动创建数据源分组关系
             market_categories = _req.get('market_categories', [])
             if market_categories:
@@ -1160,6 +1186,16 @@ async def update_data_source_config(
                 # 更新配置
                 # 🔥 修改：处理 API Key 的更新逻辑（与大模型厂家管理逻辑一致）
                 _req = request.model_dump()
+                try:
+                    from app.utils.datasource_sensitive_config import merge_sensitive_config_params_for_update
+
+                    _req["config_params"] = merge_sensitive_config_params_for_update(
+                        _req.get("type"),
+                        _req.get("config_params") or {},
+                        ds_config.config_params or {},
+                    )
+                except Exception as e:
+                    logger.warning(f"数据源敏感扩展配置合并失败: {e}")
 
                 # 处理 API Key
                 if 'api_key' in _req:
@@ -1275,6 +1311,13 @@ async def update_data_source_config(
 
                 success = await config_service.save_system_config(config)
                 if success:
+                    try:
+                        from app.utils.datasource_sensitive_config import bridge_sensitive_config_params_to_env
+
+                        bridge_sensitive_config_params_to_env(updated_config.type, updated_config.config_params)
+                    except Exception as e:
+                        logger.warning(f"数据源敏感扩展配置桥接失败: {e}")
+
                     # 🆕 同步市场分类关系
                     new_categories = set(_req.get('market_categories', []))
 

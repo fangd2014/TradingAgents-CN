@@ -4,6 +4,7 @@ from typing import Any, Optional
 from langchain_openai import ChatOpenAI
 
 from .base_client import BaseLLMClient, normalize_content
+from .provider_keys import normalize_backend_url_for_provider, normalize_model_name_for_provider
 from .validators import validate_model
 
 
@@ -20,6 +21,7 @@ _PASSTHROUGH_KWARGS = (
     "timeout",
     "max_retries",
     "callbacks",
+    "extra_body",
     "http_client",
     "http_async_client",
 )
@@ -51,11 +53,17 @@ class OpenAIClient(BaseLLMClient):
 
     def get_llm(self) -> Any:
         self.warn_if_unknown_model()
-        llm_kwargs = {"model": self.model}
+        model = normalize_model_name_for_provider(self.provider, self.model)
+        llm_kwargs = {"model": model}
 
         if self.provider in _PROVIDER_CONFIG:
             default_base_url, api_key_env = _PROVIDER_CONFIG[self.provider]
-            llm_kwargs["base_url"] = self.base_url or default_base_url
+            base_url = normalize_backend_url_for_provider(
+                self.provider,
+                self.base_url or default_base_url,
+            )
+            if base_url:
+                llm_kwargs["base_url"] = base_url
             if api_key_env:
                 api_key = self.kwargs.get("api_key") or os.environ.get(api_key_env)
                 if api_key:
@@ -71,6 +79,9 @@ class OpenAIClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        if self.provider == "deepseek" and model.startswith("deepseek-v4-"):
+            llm_kwargs.setdefault("extra_body", {"thinking": {"type": "disabled"}})
 
         return NormalizedChatOpenAI(**llm_kwargs)
 

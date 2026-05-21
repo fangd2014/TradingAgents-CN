@@ -71,3 +71,23 @@ def test_runtime_settings_priority_db_env_default(monkeypatch):
     v_def = rs.get_float("TA_US_MIN_API_INTERVAL_SECONDS", "ta_us_min_api_interval_seconds", 1.0)
     assert abs(v_def - 1.0) < 1e-9
 
+
+def test_timezone_bridge_sets_all_runtime_aliases(monkeypatch):
+    from app.core import config_bridge
+
+    for key in ("APP_TIMEZONE", "TIMEZONE", "TA_TIMEZONE", "TZ"):
+        monkeypatch.delenv(key, raising=False)
+
+    count = config_bridge._bridge_timezone_settings({"app_timezone": "Asia/Shanghai"})
+
+    assert count == 4
+    assert os.environ["APP_TIMEZONE"] == "Asia/Shanghai"
+    assert os.environ["TIMEZONE"] == "Asia/Shanghai"
+    assert os.environ["TA_TIMEZONE"] == "Asia/Shanghai"
+    assert os.environ["TZ"] == "Asia/Shanghai"
+
+
+def test_app_timezone_exports_compatibility_alias():
+    from app.utils import timezone as app_timezone
+
+    assert app_timezone.get_timezone_name() == app_timezone.get_tz_name()

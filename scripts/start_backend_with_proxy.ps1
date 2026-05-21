@@ -27,7 +27,7 @@ if (Test-Path ".env") {
         Write-Host "✅ NO_PROXY 已设置: $noProxy" -ForegroundColor Green
     } else {
         # 如果 .env 中没有配置，使用默认值
-        $defaultNoProxy = "localhost,127.0.0.1,*.eastmoney.com,*.push2.eastmoney.com,*.gtimg.cn,*.sinaimg.cn,api.tushare.pro,*.baostock.com"
+        $defaultNoProxy = "localhost,127.0.0.1,*.eastmoney.com,*.push2.eastmoney.com,*.gtimg.cn,*.sinaimg.cn,api.tushare.pro,42.194.163.97,*.baostock.com"
         $env:NO_PROXY = $defaultNoProxy
         Write-Host "⚠️  .env 中未找到 NO_PROXY 配置，使用默认值" -ForegroundColor Yellow
         Write-Host "   默认值: $defaultNoProxy" -ForegroundColor Yellow

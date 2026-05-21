@@ -1287,10 +1287,22 @@ class ConfigService:
 
                 # 测试 Tushare API
                 try:
-                    logger.info(f"🔌 [TEST] Calling Tushare API with token (length: {len(api_key)})")
+                    test_timeout = getattr(ds_config, "timeout", None) or os.getenv("TUSHARE_TIMEOUT", "30")
+                    try:
+                        test_timeout = int(test_timeout)
+                    except (TypeError, ValueError):
+                        test_timeout = 30
+                    test_timeout = max(test_timeout, 1)
+
+                    logger.info(f"🔌 [TEST] Calling Tushare API with token (length: {len(api_key)}, timeout: {test_timeout}s)")
                     import tushare as ts
+                    from tradingagents.config.tushare_endpoint import configure_tushare_api_endpoint
+
                     ts.set_token(api_key)
-                    pro = ts.pro_api()
+                    configure_tushare_api_endpoint()
+                    pro = ts.pro_api(timeout=test_timeout)
+                    api_url = configure_tushare_api_endpoint(pro)
+                    logger.info(f"🔌 [TEST] Tushare API endpoint: {api_url}")
                     # 获取交易日历（轻量级测试）
                     df = pro.trade_cal(exchange='SSE', start_date='20240101', end_date='20240101')
 
@@ -2341,6 +2353,12 @@ class ConfigService:
             async for doc in catalog_collection.find():
                 catalogs.append(ModelCatalog(**doc))
 
+            if catalogs:
+                await self._ensure_builtin_model_catalog_updates()
+                catalogs = []
+                async for doc in catalog_collection.find():
+                    catalogs.append(ModelCatalog(**doc))
+
             return catalogs
         except Exception as e:
             print(f"获取模型目录失败: {e}")
@@ -2359,6 +2377,51 @@ class ConfigService:
         except Exception as e:
             print(f"获取厂家模型目录失败: {e}")
             return None
+
+    async def _ensure_builtin_model_catalog_updates(self) -> None:
+        """Merge newly shipped model entries into existing catalog documents."""
+        try:
+            db = await self._get_db()
+            catalog_collection = db.model_catalog
+            defaults = self._get_default_model_catalog()
+
+            for default_catalog in defaults:
+                provider = default_catalog.get("provider")
+                default_models = default_catalog.get("models", [])
+                if not provider or not default_models:
+                    continue
+
+                existing = await catalog_collection.find_one({"provider": provider})
+                if not existing:
+                    continue
+
+                existing_model_names = {
+                    model.get("name")
+                    for model in existing.get("models", [])
+                    if isinstance(model, dict)
+                }
+                missing_models = [
+                    model
+                    for model in default_models
+                    if model.get("name") not in existing_model_names
+                ]
+                if not missing_models:
+                    continue
+
+                await catalog_collection.update_one(
+                    {"provider": provider},
+                    {
+                        "$push": {"models": {"$each": missing_models, "$position": 0}},
+                        "$set": {"updated_at": now_tz()},
+                    },
+                )
+                logger.info(
+                    "✅ 已补充 %s 个内置模型到 %s 模型目录",
+                    len(missing_models),
+                    provider,
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ 补充内置模型目录失败: {e}")
 
     async def save_model_catalog(self, catalog: ModelCatalog) -> bool:
         """保存或更新模型目录"""
@@ -2579,6 +2642,22 @@ class ConfigService:
                 "provider": "deepseek",
                 "provider_name": "DeepSeek",
                 "models": [
+                    {
+                        "name": "deepseek-v4-flash",
+                        "display_name": "DeepSeek V4 Flash - 快速通用",
+                        "input_price_per_1k": 0.00014,
+                        "output_price_per_1k": 0.00028,
+                        "context_length": 1000000,
+                        "currency": "USD"
+                    },
+                    {
+                        "name": "deepseek-v4-pro",
+                        "display_name": "DeepSeek V4 Pro - 高级推理",
+                        "input_price_per_1k": 0.00174,
+                        "output_price_per_1k": 0.00348,
+                        "context_length": 1000000,
+                        "currency": "USD"
+                    },
                     {
                         "name": "deepseek-chat",
                         "display_name": "DeepSeek Chat - 通用对话",
@@ -3627,18 +3706,21 @@ class ConfigService:
             data = {
                 "model": model_name,
                 "messages": [
-                    {"role": "user", "content": "你好，请简单介绍一下你自己。"}
+                    {"role": "user", "content": "你好，请回复 OK。"}
                 ],
-                "max_tokens": 50,
+                "max_tokens": 300,
                 "temperature": 0.1
             }
+            if model_name.startswith("deepseek-v4-"):
+                data["thinking"] = {"type": "disabled"}
 
             response = requests.post(url, json=data, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 result = response.json()
                 if "choices" in result and len(result["choices"]) > 0:
-                    content = result["choices"][0]["message"]["content"]
+                    message = result["choices"][0].get("message") or {}
+                    content = message.get("content") or message.get("reasoning_content") or ""
                     if content and len(content.strip()) > 0:
                         return {
                             "success": True,
@@ -3670,11 +3752,17 @@ class ConfigService:
         """测试阿里云百炼API"""
         try:
             import requests
+            from tradingagents.llm_clients.provider_keys import normalize_model_name_for_provider
 
             # 如果没有指定模型，使用默认模型
             if not model_name:
                 model_name = "qwen-turbo"
                 logger.info(f"⚠️ 未指定模型，使用默认模型: {model_name}")
+            else:
+                normalized_model_name = normalize_model_name_for_provider("dashscope", model_name)
+                if normalized_model_name != model_name:
+                    logger.info(f"✅ [DashScope 测试] 规范化模型代码: {model_name} -> {normalized_model_name}")
+                    model_name = normalized_model_name
 
             logger.info(f"🔍 [DashScope 测试] 使用模型: {model_name}")
 
@@ -3695,7 +3783,7 @@ class ConfigService:
                 "temperature": 0.1
             }
 
-            response = requests.post(url, json=data, headers=headers, timeout=10)
+            response = requests.post(url, json=data, headers=headers, timeout=60)
 
             if response.status_code == 200:
                 result = response.json()

@@ -77,6 +77,45 @@ def default_backend_url(provider: str) -> str:
     return default_urls.get(key, "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 
+def normalize_backend_url_for_provider(provider: str, backend_url: str) -> str:
+    """Normalize provider endpoint URLs to the API style expected by clients."""
+    key = normalize_provider_key(provider)
+    if not backend_url:
+        if key in {"custom_openai", ""}:
+            return ""
+        return default_backend_url(key)
+
+    normalized_url = str(backend_url).strip().rstrip("/")
+    if key == "qwen":
+        legacy_dashscope_paths = (
+            "https://dashscope.aliyuncs.com/api/v1",
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+        )
+        if normalized_url in legacy_dashscope_paths or "/services/aigc/text-generation/generation" in normalized_url:
+            return default_backend_url(key)
+
+    return normalized_url
+
+
+def normalize_model_name_for_provider(provider: str, model_name: str) -> str:
+    """Normalize provider-specific model IDs before API calls."""
+    if model_name is None:
+        return model_name
+
+    normalized = str(model_name).strip()
+    if not normalized:
+        return normalized
+
+    provider_key = normalize_provider_key(provider)
+    if provider_key == "qwen":
+        # DashScope model IDs are case-sensitive in compatible-mode. UI labels
+        # and fetched catalogs may contain Qwen3.6-Flash style names.
+        if normalized.lower().startswith(("qwen", "qwq", "qvq")):
+            return normalized.lower()
+
+    return normalized
+
+
 def canonical_aliases(provider: str) -> list[str]:
     key = normalize_provider_key(provider)
     return list(_CANONICAL_ALIASES.get(key, []))

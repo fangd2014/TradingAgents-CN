@@ -6,6 +6,7 @@
 
 import os
 import time
+import threading
 from typing import Dict, List, Optional, Any
 from enum import Enum
 import warnings
@@ -639,6 +640,59 @@ class DataSourceManager:
 
         return None
 
+    def _run_async_provider_call(self, coro):
+        """Run an async provider call from sync dataflow code.
+
+        Analysis can execute inside FastAPI's running event loop or in worker
+        threads. In the running-loop case, run the coroutine in a short-lived
+        helper thread so this synchronous API does not call run_until_complete
+        on an active loop.
+        """
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                result_holder = {}
+                error_holder = {}
+
+                def _runner():
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        asyncio.set_event_loop(new_loop)
+                        result_holder["result"] = new_loop.run_until_complete(coro)
+                    except Exception as exc:
+                        error_holder["error"] = exc
+                    finally:
+                        new_loop.close()
+                        asyncio.set_event_loop(None)
+
+                thread = threading.Thread(target=_runner, daemon=True)
+                thread.start()
+                thread.join()
+                if "error" in error_holder:
+                    raise error_holder["error"]
+                return result_holder.get("result")
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop.run_until_complete(coro)
+
+    @staticmethod
+    def _split_data_source_result(result) -> tuple[str, str | None]:
+        """Normalize data-source return values to (result_text, source_name)."""
+        if isinstance(result, tuple):
+            if not result:
+                return "", None
+            text = result[0] or ""
+            source = result[1] if len(result) > 1 else None
+            return text, source
+        return result or "", None
+
     def _save_to_cache(self, symbol: str, data: pd.DataFrame, start_date: str = None, end_date: str = None):
         """
         保存数据到缓存
@@ -1081,6 +1135,9 @@ class DataSourceManager:
                 result = f"❌ 不支持的数据源: {self.current_source.value}"
                 actual_source = None
 
+            result, source_from_result = self._split_data_source_result(result)
+            actual_source = actual_source or source_from_result
+
             # 记录详细的输出结果
             duration = time.time() - start_time
             result_length = len(result) if result else 0
@@ -1118,9 +1175,11 @@ class DataSourceManager:
                               })
 
                 # 数据质量异常时也尝试降级到其他数据源
-                fallback_result = self._try_fallback_sources(symbol, start_date, end_date)
+                fallback_result, fallback_source = self._split_data_source_result(
+                    self._try_fallback_sources(symbol, start_date, end_date)
+                )
                 if fallback_result and "❌" not in fallback_result and "错误" not in fallback_result:
-                    logger.info(f"✅ [数据来源: 备用数据源] 降级成功获取数据: {symbol}")
+                    logger.info(f"✅ [数据来源: {fallback_source or '备用数据源'}] 降级成功获取数据: {symbol}")
                     return fallback_result
                 else:
                     logger.error(f"❌ [数据来源: 所有数据源失败] 所有数据源都无法获取有效数据: {symbol}")
@@ -1138,7 +1197,10 @@ class DataSourceManager:
                             'error': str(e),
                             'event_type': 'data_fetch_exception'
                         }, exc_info=True)
-            return self._try_fallback_sources(symbol, start_date, end_date)
+            fallback_result, _ = self._split_data_source_result(
+                self._try_fallback_sources(symbol, start_date, end_date)
+            )
+            return fallback_result
 
     def _get_mongodb_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> tuple[str, str | None]:
         """
@@ -1171,14 +1233,12 @@ class DataSourceManager:
                 logger.info(f"✅ [MongoDB] 已计算技术指标: MA5/10/20/60, MACD, RSI, BOLL")
                 return result, "mongodb"
             else:
-                # MongoDB没有数据（adapter内部已记录详细的数据源信息），降级到其他数据源
-                logger.info(f"🔄 [MongoDB] 未找到{period}数据: {symbol}，开始尝试备用数据源")
-                return self._try_fallback_sources(symbol, start_date, end_date, period)
+                logger.warning(f"⚠️ [MongoDB] 未找到{period}数据: {symbol}，不再降级到在线数据源")
+                return f"❌ MongoDB中未找到{symbol}的历史行情数据，请先执行A股全量数据预热或单股同步", "mongodb"
 
         except Exception as e:
             logger.error(f"❌ [数据来源: MongoDB异常] 获取{period}数据失败: {symbol}, 错误: {e}")
-            # MongoDB异常，降级到其他数据源
-            return self._try_fallback_sources(symbol, start_date, end_date, period)
+            return f"❌ MongoDB读取{symbol}历史行情失败: {e}", "mongodb"
 
     def _get_tushare_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> str:
         """使用Tushare获取多周期数据 - 使用provider + 统一缓存"""
@@ -1200,18 +1260,7 @@ class DataSourceManager:
                 # 获取股票基本信息
                 provider = self._get_tushare_adapter()
                 if provider:
-                    import asyncio
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_closed():
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                    except RuntimeError:
-                        # 在线程池中没有事件循环，创建新的
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-
-                    stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+                    stock_info = self._run_async_provider_call(provider.get_stock_basic_info(symbol))
                     stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
                 else:
                     stock_name = f'股票{symbol}'
@@ -1227,26 +1276,14 @@ class DataSourceManager:
             if not provider:
                 return f"❌ Tushare提供器不可用"
 
-            # 使用异步方法获取历史数据
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # 在线程池中没有事件循环，创建新的
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date))
+            data = self._run_async_provider_call(provider.get_historical_data(symbol, start_date, end_date))
 
             if data is not None and not data.empty:
                 # 保存到缓存
                 self._save_to_cache(symbol, data, start_date, end_date)
 
                 # 获取股票基本信息（异步）
-                stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+                stock_info = self._run_async_provider_call(provider.get_stock_basic_info(symbol))
                 stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
                 # 格式化返回
@@ -1282,26 +1319,14 @@ class DataSourceManager:
             from .providers.china.akshare import get_akshare_provider
             provider = get_akshare_provider()
 
-            # 使用异步方法获取历史数据
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # 在线程池中没有事件循环，创建新的
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date, period))
+            data = self._run_async_provider_call(provider.get_historical_data(symbol, start_date, end_date, period))
 
             duration = time.time() - start_time
 
             if data is not None and not data.empty:
                 # 🔧 修复：使用统一的格式化方法，包含技术指标计算
                 # 获取股票基本信息
-                stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+                stock_info = self._run_async_provider_call(provider.get_stock_basic_info(symbol))
                 stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
                 # 调用统一的格式化方法（包含技术指标计算）
@@ -1326,24 +1351,12 @@ class DataSourceManager:
         from .providers.china.baostock import get_baostock_provider
         provider = get_baostock_provider()
 
-        # 使用异步方法获取历史数据
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            # 在线程池中没有事件循环，创建新的
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date, period))
+        data = self._run_async_provider_call(provider.get_historical_data(symbol, start_date, end_date, period))
 
         if data is not None and not data.empty:
             # 🔧 修复：使用统一的格式化方法，包含技术指标计算
             # 获取股票基本信息
-            stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+            stock_info = self._run_async_provider_call(provider.get_stock_basic_info(symbol))
             stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
             # 调用统一的格式化方法（包含技术指标计算）

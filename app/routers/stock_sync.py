@@ -6,6 +6,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
+import uuid
 
 from app.routers.auth_db import get_current_user
 from app.core.response import ok
@@ -13,6 +14,8 @@ from app.core.database import get_mongo_db
 from app.worker.tushare_sync_service import get_tushare_sync_service
 from app.worker.akshare_sync_service import get_akshare_sync_service
 from app.worker.financial_data_sync_service import get_financial_sync_service
+from app.services.a_share_preload_service import get_a_share_preload_service
+from app.utils.timezone import to_config_tz
 import logging
 import asyncio
 from datetime import datetime, timedelta
@@ -20,6 +23,66 @@ from datetime import datetime, timedelta
 logger = logging.getLogger("webapi")
 
 router = APIRouter(prefix="/api/stock-sync", tags=["股票数据同步"])
+
+
+def _is_china_etf_code(symbol: str) -> bool:
+    try:
+        from tradingagents.utils.stock_utils import StockUtils
+        return StockUtils.is_china_etf(symbol)
+    except Exception:
+        code = str(symbol or "").strip()
+        return len(code) == 6 and (
+            code.startswith("159")
+            or code.startswith("51")
+            or code.startswith("56")
+            or code.startswith("58")
+        )
+
+
+def _serialize_task_timezones(value):
+    """Serialize MongoDB datetimes as configured timezone ISO strings."""
+    if isinstance(value, datetime):
+        converted = to_config_tz(value)
+        return converted.isoformat() if converted else None
+    if isinstance(value, dict):
+        return {key: _serialize_task_timezones(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_serialize_task_timezones(item) for item in value]
+    return value
+
+
+async def _sync_etf_latest_to_market_quotes(symbol: str) -> dict:
+    """同步单只A股ETF实时行情到 market_quotes。"""
+    from app.services.quotes_service import get_quotes_service
+
+    db = get_mongo_db()
+    symbol6 = str(symbol).zfill(6)
+    quote = (await get_quotes_service().get_quotes([symbol6])).get(symbol6)
+    if not quote:
+        return {"success": False, "error": "未找到ETF实时行情"}
+
+    quote_doc = {
+        "code": symbol6,
+        "symbol": symbol6,
+        "name": quote.get("name"),
+        "market": "A股ETF",
+        "instrument_type": "etf",
+        "close": quote.get("close"),
+        "price": quote.get("close"),
+        "current_price": quote.get("close"),
+        "pct_chg": quote.get("pct_chg"),
+        "change_percent": quote.get("pct_chg"),
+        "amount": quote.get("amount"),
+        "volume": quote.get("volume"),
+        "data_source": quote.get("source") or "akshare_fund_etf_spot_em",
+        "updated_at": datetime.utcnow(),
+    }
+    await db.market_quotes.update_one(
+        {"code": symbol6},
+        {"$set": quote_doc},
+        upsert=True,
+    )
+    return {"success": True, "quote": quote_doc}
 
 
 async def _sync_latest_to_market_quotes(symbol: str) -> None:
@@ -119,6 +182,28 @@ class BatchStockSyncRequest(BaseModel):
     days: int = Field(30, description="历史数据天数", ge=1, le=3650)
 
 
+class ASharePreloadRequest(BaseModel):
+    """A股全量数据预热请求"""
+    days: int = Field(365, description="行情数据回溯天数", ge=1, le=3650)
+    sync_basic: bool = Field(True, description="是否同步基础数据")
+    sync_historical: bool = Field(True, description="是否同步历史行情")
+    sync_financial: bool = Field(True, description="是否同步财务数据")
+    financial_limit: int = Field(20, description="财务数据期数", ge=1, le=80)
+    limit_symbols: Optional[int] = Field(None, description="调试用：限制同步股票数量", ge=1, le=6000)
+    history_sleep_seconds: Optional[float] = Field(
+        None,
+        description="历史行情每只股票请求后的休眠秒数；为空时按数据源配置的调用频率自动计算",
+        ge=0,
+        le=30,
+    )
+    financial_sleep_seconds: Optional[float] = Field(
+        None,
+        description="财务数据每只股票请求后的休眠秒数；为空时按数据源配置的调用频率自动计算",
+        ge=0,
+        le=30,
+    )
+
+
 @router.post("/single")
 async def sync_single_stock(
     request: SingleStockSyncRequest,
@@ -145,101 +230,114 @@ async def sync_single_stock(
             "financial_sync": None,
             "basic_sync": None
         }
+        is_china_etf = _is_china_etf_code(request.symbol)
 
         # 同步实时行情
         if request.sync_realtime:
             try:
-                realtime_debug = {
-                    "requested_data_source": request.data_source,
-                    "data_source_used": None,
-                    "attempted_sources": [],
-                    "primary_stats": None,
-                    "fallback_stats": None,
-                    "primary_error": None,
-                    "fallback_error": None
-                }
-
-                # 🔥 单个股票实时行情同步：优先使用 AKShare（避免 Tushare 接口限制）
-                actual_data_source = request.data_source
-                if request.data_source == "tushare":
-                    logger.info(f"💡 单个股票实时行情同步，自动切换到 AKShare 数据源（避免 Tushare 接口限制）")
-                    actual_data_source = "akshare"
-                realtime_debug["data_source_used"] = actual_data_source
-                realtime_debug["attempted_sources"].append(actual_data_source)
-
-                if actual_data_source == "tushare":
-                    service = await get_tushare_sync_service()
-                elif actual_data_source == "akshare":
-                    service = await get_akshare_sync_service()
+                if is_china_etf:
+                    etf_sync = await _sync_etf_latest_to_market_quotes(request.symbol)
+                    result["realtime_sync"] = {
+                        "success": etf_sync.get("success", False),
+                        "message": "ETF实时行情同步成功" if etf_sync.get("success") else "ETF实时行情同步失败",
+                        "data_source_used": "akshare_etf",
+                        "market_quote_available": etf_sync.get("success", False),
+                        "market_quote_snapshot": etf_sync.get("quote"),
+                        "error": etf_sync.get("error"),
+                    }
+                    logger.info(f"✅ {request.symbol} ETF实时行情同步完成: {etf_sync.get('success', False)}")
                 else:
-                    raise ValueError(f"不支持的数据源: {actual_data_source}")
+                    realtime_debug = {
+                        "requested_data_source": request.data_source,
+                        "data_source_used": None,
+                        "attempted_sources": [],
+                        "primary_stats": None,
+                        "fallback_stats": None,
+                        "primary_error": None,
+                        "fallback_error": None
+                    }
 
-                # 同步实时行情（只同步指定的股票）
-                realtime_result = await service.sync_realtime_quotes(
-                    symbols=[request.symbol],
-                    force=True  # 强制执行，跳过交易时间检查
-                )
-                realtime_debug["primary_stats"] = realtime_result
-                if realtime_result.get("errors"):
-                    realtime_debug["primary_error"] = realtime_result["errors"][0]
+                    # 🔥 单个股票实时行情同步：优先使用 AKShare（避免 Tushare 接口限制）
+                    actual_data_source = request.data_source
+                    if request.data_source == "tushare":
+                        logger.info(f"💡 单个股票实时行情同步，自动切换到 AKShare 数据源（避免 Tushare 接口限制）")
+                        actual_data_source = "akshare"
+                    realtime_debug["data_source_used"] = actual_data_source
+                    realtime_debug["attempted_sources"].append(actual_data_source)
 
-                # 🔥 如果 AKShare 同步失败，回退到 Tushare 全量同步
-                if actual_data_source == "akshare" and realtime_result.get("success_count", 0) == 0:
-                    logger.warning(f"⚠️ AKShare 同步失败，回退到 Tushare 全量同步")
-                    logger.info(f"💡 Tushare 只支持全量同步，将同步所有股票的实时行情")
-                    realtime_debug["attempted_sources"].append("tushare")
-
-                    tushare_service = await get_tushare_sync_service()
-                    if tushare_service:
-                        # 使用 Tushare 全量同步（不指定 symbols，同步所有股票）
-                        fallback_result = await tushare_service.sync_realtime_quotes(
-                            symbols=None,  # 全量同步
-                            force=True
-                        )
-                        realtime_debug["fallback_stats"] = fallback_result
-                        if fallback_result.get("errors"):
-                            realtime_debug["fallback_error"] = fallback_result["errors"][0]
-                        realtime_result = fallback_result
-                        logger.info(f"✅ Tushare 全量同步完成: 成功 {realtime_result.get('success_count', 0)} 只")
+                    if actual_data_source == "tushare":
+                        service = await get_tushare_sync_service()
+                    elif actual_data_source == "akshare":
+                        service = await get_akshare_sync_service()
                     else:
-                        logger.error(f"❌ Tushare 服务不可用，无法回退")
-                        realtime_result["fallback_failed"] = True
-                        realtime_debug["fallback_error"] = {"error": "Tushare 服务不可用，无法回退", "context": "fallback_unavailable"}
+                        raise ValueError(f"不支持的数据源: {actual_data_source}")
 
-                success = realtime_result.get("success_count", 0) > 0
+                    # 同步实时行情（只同步指定的股票）
+                    realtime_result = await service.sync_realtime_quotes(
+                        symbols=[request.symbol],
+                        force=True  # 强制执行，跳过交易时间检查
+                    )
+                    realtime_debug["primary_stats"] = realtime_result
+                    if realtime_result.get("errors"):
+                        realtime_debug["primary_error"] = realtime_result["errors"][0]
 
-                # 🔥 如果切换了数据源，在消息中说明
-                message = f"实时行情同步{'成功' if success else '失败'}"
-                if request.data_source == "tushare" and actual_data_source == "akshare":
-                    message += "（已自动切换到 AKShare 数据源）"
+                    # 🔥 如果 AKShare 同步失败，回退到 Tushare 全量同步
+                    if actual_data_source == "akshare" and realtime_result.get("success_count", 0) == 0:
+                        logger.warning(f"⚠️ AKShare 同步失败，回退到 Tushare 全量同步")
+                        logger.info(f"💡 Tushare 只支持全量同步，将同步所有股票的实时行情")
+                        realtime_debug["attempted_sources"].append("tushare")
 
-                db = get_mongo_db()
-                latest_quote = await db.market_quotes.find_one(
-                    {"code": str(request.symbol).zfill(6)},
-                    {"_id": 0, "code": 1, "trade_date": 1, "updated_at": 1, "close": 1}
-                )
+                        tushare_service = await get_tushare_sync_service()
+                        if tushare_service:
+                            # 使用 Tushare 全量同步（不指定 symbols，同步所有股票）
+                            fallback_result = await tushare_service.sync_realtime_quotes(
+                                symbols=None,  # 全量同步
+                                force=True
+                            )
+                            realtime_debug["fallback_stats"] = fallback_result
+                            if fallback_result.get("errors"):
+                                realtime_debug["fallback_error"] = fallback_result["errors"][0]
+                            realtime_result = fallback_result
+                            logger.info(f"✅ Tushare 全量同步完成: 成功 {realtime_result.get('success_count', 0)} 只")
+                        else:
+                            logger.error(f"❌ Tushare 服务不可用，无法回退")
+                            realtime_result["fallback_failed"] = True
+                            realtime_debug["fallback_error"] = {"error": "Tushare 服务不可用，无法回退", "context": "fallback_unavailable"}
 
-                result["realtime_sync"] = {
-                    "success": success,
-                    "message": message,
-                    "data_source_used": actual_data_source,  # 🔥 返回实际使用的数据源
-                    "attempted_sources": realtime_debug["attempted_sources"],
-                    "primary_error": realtime_debug["primary_error"],
-                    "fallback_error": realtime_debug["fallback_error"],
-                    "market_quote_available": latest_quote is not None,
-                    "market_quote_snapshot": latest_quote
-                }
-                logger.info(f"✅ {request.symbol} 实时行情同步完成: {success}")
-                logger.info(
-                    "📋 %s 实时行情同步详情: requested=%s, used=%s, attempted=%s, primary_error=%s, fallback_error=%s, market_quote_available=%s",
-                    request.symbol,
-                    request.data_source,
-                    actual_data_source,
-                    realtime_debug["attempted_sources"],
-                    realtime_debug["primary_error"],
-                    realtime_debug["fallback_error"],
-                    latest_quote is not None,
-                )
+                    success = realtime_result.get("success_count", 0) > 0
+
+                    # 🔥 如果切换了数据源，在消息中说明
+                    message = f"实时行情同步{'成功' if success else '失败'}"
+                    if request.data_source == "tushare" and actual_data_source == "akshare":
+                        message += "（已自动切换到 AKShare 数据源）"
+
+                    db = get_mongo_db()
+                    latest_quote = await db.market_quotes.find_one(
+                        {"code": str(request.symbol).zfill(6)},
+                        {"_id": 0, "code": 1, "trade_date": 1, "updated_at": 1, "close": 1}
+                    )
+
+                    result["realtime_sync"] = {
+                        "success": success,
+                        "message": message,
+                        "data_source_used": actual_data_source,  # 🔥 返回实际使用的数据源
+                        "attempted_sources": realtime_debug["attempted_sources"],
+                        "primary_error": realtime_debug["primary_error"],
+                        "fallback_error": realtime_debug["fallback_error"],
+                        "market_quote_available": latest_quote is not None,
+                        "market_quote_snapshot": latest_quote
+                    }
+                    logger.info(f"✅ {request.symbol} 实时行情同步完成: {success}")
+                    logger.info(
+                        "📋 %s 实时行情同步详情: requested=%s, used=%s, attempted=%s, primary_error=%s, fallback_error=%s, market_quote_available=%s",
+                        request.symbol,
+                        request.data_source,
+                        actual_data_source,
+                        realtime_debug["attempted_sources"],
+                        realtime_debug["primary_error"],
+                        realtime_debug["fallback_error"],
+                        latest_quote is not None,
+                    )
 
             except Exception as e:
                 logger.error(f"❌ {request.symbol} 实时行情同步失败: {e}")
@@ -249,7 +347,7 @@ async def sync_single_stock(
                 }
         
         # 同步历史数据
-        if request.sync_historical:
+        if request.sync_historical and not is_china_etf:
             try:
                 if request.data_source == "tushare":
                     service = await get_tushare_sync_service()
@@ -313,7 +411,7 @@ async def sync_single_stock(
                 }
         
         # 同步财务数据
-        if request.sync_financial:
+        if request.sync_financial and not is_china_etf:
             try:
                 financial_service = await get_financial_sync_service()
                 
@@ -459,11 +557,11 @@ async def sync_single_stock(
                                 if field in daily_metrics:
                                     doc[field] = daily_metrics[field]
 
-                            # 添加 ROE
+                            # 添加财务指标快照
                             if isinstance(ts_code, str) and ts_code in roe_map:
-                                roe_val = roe_map[ts_code].get("roe")
-                                if roe_val is not None:
-                                    doc["roe"] = roe_val
+                                for field, value in roe_map[ts_code].items():
+                                    if value is not None:
+                                        doc[field] = value
 
                             # 添加交易指标
                             for field in ["turnover_rate", "volume_ratio"]:
@@ -758,6 +856,88 @@ async def sync_batch_stocks(
         raise HTTPException(status_code=500, detail=f"批量同步失败: {str(e)}")
 
 
+@router.post("/preload-a-share")
+async def preload_a_share_data(
+    request: ASharePreloadRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    一次性预热A股全市场数据到MongoDB。
+
+    后台依次同步：
+    - stock_basic_info：基础数据和估值基础指标
+    - stock_daily_quotes：最近 N 天日线行情
+    - stock_financial_data：财务数据
+    - market_quotes：由最新日线回填行情快照
+    """
+    try:
+        task_id = str(uuid.uuid4())
+        user_id = str(current_user.get("id") or current_user.get("_id") or current_user.get("username") or "admin")
+        service = get_a_share_preload_service()
+
+        # 先写入任务，让任务中心和状态接口马上可见。
+        await service._update_task(
+            task_id,
+            user_id,
+            status="running",
+            progress=1,
+            message="A股数据预热任务已提交，等待后台执行",
+            current_step="queued",
+            extra={
+                "parameters": request.model_dump(),
+            },
+        )
+
+        background_tasks.add_task(
+            service.run_preload,
+            task_id,
+            user_id,
+            days=request.days,
+            sync_basic=request.sync_basic,
+            sync_historical=request.sync_historical,
+            sync_financial=request.sync_financial,
+            financial_limit=request.financial_limit,
+            limit_symbols=request.limit_symbols,
+            history_sleep_seconds=request.history_sleep_seconds,
+            financial_sleep_seconds=request.financial_sleep_seconds,
+        )
+
+        return ok(
+            data={
+                "task_id": task_id,
+                "status": "running",
+                "task_type": "data_preload",
+                "parameters": request.model_dump(),
+            },
+            message="A股全量数据预热任务已添加到任务中心"
+        )
+    except Exception as e:
+        logger.error(f"❌ 创建A股预热任务失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"创建A股预热任务失败: {str(e)}")
+
+
+@router.get("/preload-a-share/{task_id}")
+async def get_preload_a_share_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """查询A股预热任务状态。"""
+    try:
+        db = get_mongo_db()
+        task = await db.data_preload_tasks.find_one({"task_id": task_id}, {"_id": 0})
+        if not task:
+            task = await db.analysis_tasks.find_one({"task_id": task_id}, {"_id": 0})
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return ok(data=_serialize_task_timezones(task))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 查询A股预热任务失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"查询A股预热任务失败: {str(e)}")
+
+
 @router.get("/status/{symbol}")
 async def get_sync_status(
     symbol: str,
@@ -773,29 +953,31 @@ async def get_sync_status(
         
         db = get_mongo_db()
         
+        symbol6 = str(symbol).zfill(6)
+
         # 查询历史数据最后同步时间
-        hist_doc = await db.historical_data.find_one(
-            {"symbol": symbol},
-            sort=[("date", -1)]
+        hist_doc = await db.stock_daily_quotes.find_one(
+            {"symbol": symbol6, "period": "daily"},
+            sort=[("trade_date", -1)]
         )
         
         # 查询财务数据最后同步时间
         fin_doc = await db.stock_financial_data.find_one(
-            {"symbol": symbol},
+            {"symbol": symbol6},
             sort=[("updated_at", -1)]
         )
         
         # 统计历史数据条数
-        hist_count = await db.historical_data.count_documents({"symbol": symbol})
+        hist_count = await db.stock_daily_quotes.count_documents({"symbol": symbol6, "period": "daily"})
         
         # 统计财务数据条数
-        fin_count = await db.stock_financial_data.count_documents({"symbol": symbol})
+        fin_count = await db.stock_financial_data.count_documents({"symbol": symbol6})
         
         return ok(data={
-            "symbol": symbol,
+            "symbol": symbol6,
             "historical_data": {
                 "last_sync": hist_doc.get("updated_at") if hist_doc else None,
-                "last_date": hist_doc.get("date") if hist_doc else None,
+                "last_date": hist_doc.get("trade_date") if hist_doc else None,
                 "total_records": hist_count
             },
             "financial_data": {
@@ -808,4 +990,3 @@ async def get_sync_status(
     except Exception as e:
         logger.error(f"❌ 获取同步状态失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取同步状态失败: {str(e)}")
-

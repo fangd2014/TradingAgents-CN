@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     HTTP_PROXY: str = Field(default="")
     HTTPS_PROXY: str = Field(default="")
     NO_PROXY: str = Field(
-        default="localhost,127.0.0.1,eastmoney.com,push2.eastmoney.com,82.push2.eastmoney.com,82.push2delay.eastmoney.com,gtimg.cn,sinaimg.cn,api.tushare.pro,baostock.com"
+        default="localhost,127.0.0.1,eastmoney.com,push2.eastmoney.com,82.push2.eastmoney.com,82.push2delay.eastmoney.com,gtimg.cn,sinaimg.cn,api.tushare.pro,42.194.163.97,baostock.com"
     )
 
     # 文件上传配置
@@ -233,6 +233,7 @@ class Settings(BaseSettings):
 
     # Tushare基础配置
     TUSHARE_TOKEN: str = Field(default="", description="Tushare API Token")
+    TUSHARE_API_URL: str = Field(default="http://api.tushare.pro", description="Tushare Pro API endpoint")
     TUSHARE_ENABLED: bool = Field(default=True, description="启用Tushare数据源")
     TUSHARE_TIER: str = Field(default="standard", description="Tushare积分等级 (free/basic/standard/premium/vip)")
     TUSHARE_RATE_LIMIT_SAFETY_MARGIN: float = Field(default=0.8, ge=0.1, le=1.0, description="速率限制安全边际")

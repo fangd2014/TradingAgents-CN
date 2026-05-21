@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
@@ -14,6 +15,169 @@ class IndicatorSpec:
 
 
 SUPPORTED = {"ma", "ema", "macd", "rsi", "boll", "atr", "kdj"}
+
+
+def _round_or_none(value: Any, digits: int = 2):
+    if value is None or pd.isna(value):
+        return None
+    return round(float(value), digits)
+
+
+def _weighted_percentile(values: np.ndarray, weights: np.ndarray, percentile: float) -> float:
+    if len(values) == 0 or weights.sum() <= 0:
+        return np.nan
+    order = np.argsort(values)
+    sorted_values = values[order]
+    sorted_weights = weights[order]
+    cumulative = np.cumsum(sorted_weights)
+    threshold = percentile / 100.0 * sorted_weights.sum()
+    idx = int(np.searchsorted(cumulative, threshold, side="left"))
+    idx = max(0, min(len(sorted_values) - 1, idx))
+    return float(sorted_values[idx])
+
+
+def _detect_volume_col(df: pd.DataFrame) -> Optional[str]:
+    if "volume" in df.columns:
+        return "volume"
+    if "vol" in df.columns:
+        return "vol"
+    return None
+
+
+def _detect_turnover_col(df: pd.DataFrame) -> Optional[str]:
+    for col in ("turnover", "turnover_rate", "换手率"):
+        if col in df.columns:
+            return col
+    return None
+
+
+def _estimate_daily_turnover(data: pd.DataFrame, volume_col: str, turnover_col: Optional[str]) -> pd.Series:
+    if turnover_col:
+        turnover = pd.to_numeric(data[turnover_col], errors="coerce").fillna(0.0)
+        # A股常见换手率列是百分数；若小于1则视为小数比例。
+        if turnover.max() > 1:
+            turnover = turnover / 100.0
+        return turnover.clip(lower=0.0, upper=1.0)
+
+    volume = pd.to_numeric(data[volume_col], errors="coerce").fillna(0.0)
+    rolling_base = volume.rolling(window=120, min_periods=20).sum().replace(0, np.nan)
+    turnover = (volume / rolling_base).fillna(volume / max(float(volume.sum()), 1.0))
+    return turnover.clip(lower=0.0, upper=0.20)
+
+
+def _build_daily_distribution(
+    low: float,
+    high: float,
+    close: float,
+    turnover_weight: float,
+    centers: np.ndarray,
+    method: str,
+) -> np.ndarray:
+    weights = np.zeros(len(centers), dtype=float)
+    if high <= low:
+        idx = int(np.argmin(np.abs(centers - close)))
+        weights[idx] = turnover_weight
+        return weights
+
+    mask = (centers >= low) & (centers <= high)
+    indices = np.where(mask)[0]
+    if len(indices) == 0:
+        idx = int(np.argmin(np.abs(centers - close)))
+        weights[idx] = turnover_weight
+        return weights
+
+    if method == "triangular":
+        typical = (high + low + close) / 3.0
+        distance = np.abs(centers[indices] - typical)
+        half_range = max((high - low) / 2.0, 1e-9)
+        local = np.maximum(0.0, 1.0 - distance / half_range)
+        if local.sum() <= 0:
+            local = np.ones(len(indices), dtype=float)
+    else:
+        local = np.ones(len(indices), dtype=float)
+
+    weights[indices] = local / local.sum() * turnover_weight
+    return weights
+
+
+def _local_peak_indices(weights: np.ndarray, min_ratio: float = 0.08) -> List[int]:
+    if len(weights) == 0 or weights.sum() <= 0:
+        return []
+    threshold = weights.sum() * min_ratio
+    peaks: List[int] = []
+    for i, value in enumerate(weights):
+        left = weights[i - 1] if i > 0 else -np.inf
+        right = weights[i + 1] if i < len(weights) - 1 else -np.inf
+        if value >= threshold and value >= left and value >= right:
+            peaks.append(i)
+    return sorted(peaks, key=lambda idx: weights[idx], reverse=True)
+
+
+def _classify_peak_shape(weights: np.ndarray) -> str:
+    total = float(weights.sum())
+    if total <= 0:
+        return "数据不足"
+    peaks = _local_peak_indices(weights)
+    sorted_ratio = np.sort(weights)[::-1]
+    top3_ratio = float(sorted_ratio[:3].sum() / total) if len(sorted_ratio) else 0.0
+    if len(peaks) <= 1 and top3_ratio >= 0.35:
+        return "单峰密集"
+    if len(peaks) >= 2:
+        return "多峰密集"
+    return "发散形态"
+
+
+def _classify_main_force_behavior(metrics: Dict[str, Any]) -> tuple[str, str]:
+    price_percentile = metrics["price_percentile_pct"]
+    cost_90 = metrics["cost_90_concentration_pct"]
+    winner = metrics["winner_ratio_pct"]
+    bottom_retention = metrics["bottom_peak_retention_pct"]
+    peak_shift = metrics["peak_shift_pct"]
+    recent_volume = metrics["recent_volume_ratio"]
+    price_vs_peak = metrics["price_vs_peak_pct"]
+    peak_shape = metrics["peak_shape"]
+
+    if (
+        price_percentile >= 70
+        and bottom_retention < 35
+        and recent_volume >= 1.8
+        and (winner >= 80 or peak_shift >= 20 or cost_90 >= 18)
+    ):
+        return "distribution", "高位放量且底部筹码峰快速消失，新高位成本堆积，疑似主力派发/抛售"
+
+    if (
+        cost_90 <= 15
+        and 1.1 <= recent_volume <= 1.8
+        and bottom_retention >= 45
+        and abs(peak_shift) <= 8
+        and abs(price_vs_peak) <= 6
+    ):
+        return "accumulation", "低位单峰逐步集中且温和放量，疑似主力建仓吸筹"
+
+    if (
+        price_vs_peak > 8
+        and bottom_retention >= 55
+        and recent_volume <= 0.8
+        and cost_90 <= 18
+    ):
+        return "lockup", "股价脱离底部成本区但底峰稳定且缩量，疑似主力锁仓控盘"
+
+    if (
+        peak_shape == "多峰密集"
+        and bottom_retention >= 45
+        and peak_shift > 3
+        and 0.8 <= recent_volume <= 2.2
+    ):
+        return "relay", "底峰仍在且上方形成新峰，疑似拉升中继"
+
+    if (
+        price_vs_peak < -3
+        and bottom_retention >= 50
+        and recent_volume <= 0.75
+    ):
+        return "wash", "短期回落缩量但底部筹码峰未明显松动，疑似洗盘"
+
+    return "neutral", "筹码与量价信号未形成明确主力行为结论"
 
 
 def _require_cols(df: pd.DataFrame, cols: Iterable[str]):
@@ -269,6 +433,305 @@ def compute_many(df: pd.DataFrame, specs: List[IndicatorSpec]) -> pd.DataFrame:
     return out
 
 
+def analyze_chip_peak(
+    df: pd.DataFrame,
+    lookback: int = 120,
+    bins: int = 48,
+    decay_coefficient: float = 1.0,
+    distribution_method: str = "average",
+) -> Dict[str, Any]:
+    """
+    Estimate chip distribution by aggregating recent traded volume into price bins.
+
+    This is a K-line approximation, not exchange-level holder cost data. It is
+    useful for observing recent cost concentration, support/resistance, and
+    whether high-volume cost areas are moving up or down.
+    """
+    if df is None or df.empty:
+        return {"available": False, "reason": "无可用K线数据"}
+
+    volume_col = _detect_volume_col(df)
+    turnover_col = _detect_turnover_col(df)
+    _require_cols(df, ["high", "low", "close"])
+    if not volume_col:
+        raise ValueError(f"DataFrame缺少成交量列: volume/vol, 现有列: {list(df.columns)[:10]}...")
+
+    data = df.tail(int(lookback)).copy()
+    required_cols = ["high", "low", "close", volume_col]
+    if turnover_col:
+        required_cols.append(turnover_col)
+    data = data[required_cols].apply(pd.to_numeric, errors="coerce")
+    data = data.dropna(subset=["high", "low", "close", volume_col])
+    data = data[data[volume_col] > 0]
+    if len(data) < 5:
+        return {"available": False, "reason": "有效K线或成交量数据不足"}
+
+    low_price = float(data["low"].min())
+    high_price = float(data["high"].max())
+    current_price = float(data["close"].iloc[-1])
+    if high_price <= low_price:
+        return {"available": False, "reason": "价格区间无波动，无法形成筹码分布"}
+
+    bin_count = max(16, int(bins))
+    edges = np.linspace(low_price, high_price, bin_count + 1)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    distribution = np.zeros(bin_count, dtype=float)
+    turnover_series = _estimate_daily_turnover(data, volume_col, turnover_col)
+    decay_coefficient = max(0.1, min(float(decay_coefficient), 10.0))
+    snapshots: List[np.ndarray] = []
+
+    for i, (_, row) in enumerate(data.iterrows()):
+        moved_ratio = min(float(turnover_series.iloc[i]) * decay_coefficient, 1.0)
+        daily_distribution = _build_daily_distribution(
+            low=float(row["low"]),
+            high=float(row["high"]),
+            close=float(row["close"]),
+            turnover_weight=moved_ratio,
+            centers=centers,
+            method=distribution_method,
+        )
+        distribution = distribution * (1.0 - moved_ratio) + daily_distribution
+        total = distribution.sum()
+        if total > 0:
+            distribution = distribution / total
+        snapshots.append(distribution.copy())
+
+    total_weight = float(distribution.sum())
+    if total_weight <= 0:
+        return {"available": False, "reason": "筹码分布权重合计为0"}
+
+    weights = distribution
+    peak_idx = int(np.argmax(weights))
+    main_peak_price = float(centers[peak_idx])
+    main_peak_ratio = float(weights[peak_idx] / total_weight)
+
+    sorted_indices = np.argsort(weights)[::-1]
+    secondary_idx = int(sorted_indices[1]) if len(sorted_indices) > 1 and weights[sorted_indices[1]] > 0 else peak_idx
+    secondary_peak_price = float(centers[secondary_idx])
+    secondary_peak_ratio = float(weights[secondary_idx] / total_weight)
+
+    top3_ratio = float(weights[sorted_indices[:3]].sum() / total_weight)
+    winner_ratio = float(weights[centers <= current_price].sum() / total_weight)
+    pressure_ratio = float(weights[centers > current_price].sum() / total_weight)
+    price_vs_peak_pct = (current_price - main_peak_price) / main_peak_price * 100 if main_peak_price else 0.0
+    cost_5 = _weighted_percentile(centers, weights, 5)
+    cost_15 = _weighted_percentile(centers, weights, 15)
+    cost_50 = _weighted_percentile(centers, weights, 50)
+    cost_85 = _weighted_percentile(centers, weights, 85)
+    cost_95 = _weighted_percentile(centers, weights, 95)
+    cost_90_concentration = (cost_95 - cost_5) / (cost_95 + cost_5) * 100 if (cost_95 + cost_5) else np.nan
+    cost_70_concentration = (cost_85 - cost_15) / (cost_85 + cost_15) * 100 if (cost_85 + cost_15) else np.nan
+    overlap_denominator = cost_95 - cost_5
+    cost_overlap_ratio = (cost_85 - cost_15) / overlap_denominator if overlap_denominator else np.nan
+    peak_shape = _classify_peak_shape(weights)
+    if cost_90_concentration <= 10 and peak_shape == "发散形态":
+        peak_shape = "单峰密集"
+    elif cost_90_concentration <= 15 and len(_local_peak_indices(weights, min_ratio=0.04)) <= 2:
+        peak_shape = "单峰密集"
+
+    snapshot_idx = max(0, len(snapshots) - max(20, len(snapshots) // 4))
+    previous_weights = snapshots[snapshot_idx]
+    previous_peak_price = float(centers[int(np.argmax(previous_weights))]) if previous_weights.sum() > 0 else main_peak_price
+    peak_shift_pct = (main_peak_price - previous_peak_price) / previous_peak_price * 100 if previous_peak_price else 0.0
+
+    bottom_cutoff = low_price + (high_price - low_price) * 0.35
+    bottom_mask = centers <= bottom_cutoff
+    previous_bottom = float(previous_weights[bottom_mask].sum()) if previous_weights.sum() > 0 else 0.0
+    current_bottom = float(weights[bottom_mask].sum())
+    bottom_peak_retention_pct = (current_bottom / previous_bottom * 100) if previous_bottom > 0 else (100.0 if current_bottom > 0 else 0.0)
+
+    recent_window = max(5, min(20, len(data) // 3))
+    earlier_volume = float(data[volume_col].iloc[-recent_window * 2:-recent_window].mean()) if len(data) >= recent_window * 2 else float(data[volume_col].head(recent_window).mean())
+    recent_volume = float(data[volume_col].tail(recent_window).mean())
+    recent_volume_ratio = recent_volume / earlier_volume if earlier_volume > 0 else 1.0
+
+    price_percentile_pct = (current_price - low_price) / (high_price - low_price) * 100 if high_price > low_price else 50.0
+    behavior_metrics = {
+        "price_percentile_pct": price_percentile_pct,
+        "cost_90_concentration_pct": cost_90_concentration,
+        "winner_ratio_pct": winner_ratio * 100,
+        "bottom_peak_retention_pct": bottom_peak_retention_pct,
+        "peak_shift_pct": peak_shift_pct,
+        "recent_volume_ratio": recent_volume_ratio,
+        "price_vs_peak_pct": price_vs_peak_pct,
+        "peak_shape": peak_shape,
+    }
+    behavior_code, signal = _classify_main_force_behavior(behavior_metrics)
+
+    return {
+        "available": True,
+        "lookback": int(len(data)),
+        "decay_coefficient": _round_or_none(decay_coefficient),
+        "distribution_method": distribution_method,
+        "current_price": _round_or_none(current_price),
+        "main_peak_price": _round_or_none(main_peak_price),
+        "main_peak_ratio": _round_or_none(main_peak_ratio * 100),
+        "secondary_peak_price": _round_or_none(secondary_peak_price),
+        "secondary_peak_ratio": _round_or_none(secondary_peak_ratio * 100),
+        "chip_concentration_top3": _round_or_none(top3_ratio * 100),
+        "peak_shape": peak_shape,
+        "winner_ratio": _round_or_none(winner_ratio),
+        "winner_ratio_pct": _round_or_none(winner_ratio * 100),
+        "pressure_ratio_pct": _round_or_none(pressure_ratio * 100),
+        "price_vs_peak_pct": _round_or_none(price_vs_peak_pct),
+        "peak_shift_pct": _round_or_none(peak_shift_pct),
+        "cost_percentiles": {
+            "cost_5": _round_or_none(cost_5),
+            "cost_15": _round_or_none(cost_15),
+            "cost_50": _round_or_none(cost_50),
+            "cost_85": _round_or_none(cost_85),
+            "cost_95": _round_or_none(cost_95),
+        },
+        "cost_70_range": (_round_or_none(cost_15), _round_or_none(cost_85)),
+        "cost_90_range": (_round_or_none(cost_5), _round_or_none(cost_95)),
+        "cost_70_concentration_pct": _round_or_none(cost_70_concentration),
+        "cost_90_concentration_pct": _round_or_none(cost_90_concentration),
+        "cost_overlap_ratio": _round_or_none(cost_overlap_ratio),
+        "bottom_peak_retention_pct": _round_or_none(bottom_peak_retention_pct),
+        "recent_volume_ratio": _round_or_none(recent_volume_ratio),
+        "price_percentile_pct": _round_or_none(price_percentile_pct),
+        "behavior_code": behavior_code,
+        "main_force_signal": signal,
+        "support_zone": (
+            _round_or_none(main_peak_price * 0.97),
+            _round_or_none(main_peak_price * 1.03),
+        ),
+        "pressure_zone": (
+            _round_or_none(secondary_peak_price * 0.97),
+            _round_or_none(secondary_peak_price * 1.03),
+        ),
+        "distribution": [
+            {
+                "price": _round_or_none(price),
+                "weight_pct": _round_or_none(weight * 100),
+                "winner": bool(price <= current_price),
+            }
+            for price, weight in zip(centers, weights)
+            if weight > 0
+        ],
+    }
+
+
+def render_chip_peak_svg(result: Dict[str, Any], width: int = 720, height: int = 360) -> str:
+    if not result.get("available"):
+        return ""
+
+    distribution = result.get("distribution") or []
+    if not distribution:
+        return ""
+
+    left_pad = 96
+    right_pad = 118
+    top_pad = 42
+    bottom_pad = 44
+    chart_width = width - left_pad - right_pad
+    chart_height = height - top_pad - bottom_pad
+    prices = [float(item["price"]) for item in distribution if item.get("price") is not None]
+    weights = [float(item["weight_pct"]) for item in distribution if item.get("weight_pct") is not None]
+    if not prices or not weights:
+        return ""
+
+    min_price = min(prices)
+    max_price = max(prices)
+    max_weight = max(weights) or 1.0
+    bar_gap = 1
+    bar_height = max(3, chart_height / len(distribution) - bar_gap)
+
+    def y_for_price(price: float) -> float:
+        if max_price == min_price:
+            return top_pad + chart_height / 2
+        return top_pad + (max_price - price) / (max_price - min_price) * chart_height
+
+    def marker_line(price: Optional[float], label: str, color: str, dash: str = "") -> str:
+        if price is None:
+            return ""
+        y = y_for_price(float(price))
+        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        return (
+            f'<line x1="{left_pad}" y1="{y:.1f}" x2="{width - right_pad + 8}" y2="{y:.1f}" '
+            f'stroke="{color}" stroke-width="1.5"{dash_attr}/>'
+            f'<text x="{width - right_pad + 14}" y="{y + 4:.1f}" font-size="12" fill="{color}">'
+            f'{escape(label)} {float(price):.2f}</text>'
+        )
+
+    bars = []
+    for item in distribution:
+        price = float(item["price"])
+        weight = float(item["weight_pct"])
+        y = y_for_price(price) - bar_height / 2
+        bar_width = weight / max_weight * chart_width
+        fill = "#e74c3c" if item.get("winner") else "#3498db"
+        bars.append(
+            f'<rect x="{left_pad}" y="{y:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" '
+            f'rx="2" fill="{fill}" opacity="0.78"/>'
+        )
+
+    cost = result.get("cost_percentiles") or {}
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="筹码峰分布图">',
+        '<rect width="100%" height="100%" fill="#fff"/>',
+        '<text x="20" y="24" font-size="18" font-weight="700" fill="#1f2933">筹码峰分布图</text>',
+        '<text x="20" y="44" font-size="12" fill="#6b7280">红色=获利筹码，蓝色=套牢筹码；横向长度代表筹码权重</text>',
+        f'<line x1="{left_pad}" y1="{top_pad}" x2="{left_pad}" y2="{height - bottom_pad}" stroke="#9aa4b2" stroke-width="1"/>',
+        f'<line x1="{left_pad}" y1="{height - bottom_pad}" x2="{width - right_pad}" y2="{height - bottom_pad}" stroke="#9aa4b2" stroke-width="1"/>',
+        *bars,
+        marker_line(result.get("main_peak_price"), "主峰", "#c0392b"),
+        marker_line(result.get("current_price"), "当前价", "#111827", "5 4"),
+        marker_line(cost.get("cost_50"), "平均成本", "#f59e0b", "4 3"),
+        f'<text x="20" y="{top_pad + 4}" font-size="12" fill="#4b5563">{max_price:.2f}</text>',
+        f'<text x="20" y="{height - bottom_pad + 4}" font-size="12" fill="#4b5563">{min_price:.2f}</text>',
+        f'<text x="{left_pad}" y="{height - 14}" font-size="12" fill="#6b7280">0%</text>',
+        f'<text x="{width - right_pad - 44}" y="{height - 14}" font-size="12" fill="#6b7280">{max_weight:.2f}%</text>',
+        f'<text x="20" y="{height - 14}" font-size="12" fill="#374151">主力动向：{escape(str(result.get("main_force_signal", "")))}</text>',
+        '</svg>',
+    ]
+    return "".join(svg_parts)
+
+
+def format_chip_peak_report(
+    df: pd.DataFrame,
+    lookback: int = 120,
+    bins: int = 48,
+    decay_coefficient: float = 1.0,
+    distribution_method: str = "average",
+) -> str:
+    result = analyze_chip_peak(
+        df,
+        lookback=lookback,
+        bins=bins,
+        decay_coefficient=decay_coefficient,
+        distribution_method=distribution_method,
+    )
+    if not result.get("available"):
+        return f"### 5. 筹码峰分析\n- 暂不可用：{result.get('reason', '数据不足')}\n"
+
+    support_low, support_high = result["support_zone"]
+    pressure_low, pressure_high = result["pressure_zone"]
+    cost_70_low, cost_70_high = result["cost_70_range"]
+    cost_90_low, cost_90_high = result["cost_90_range"]
+    svg = render_chip_peak_svg(result)
+    return (
+        "### 5. 筹码峰分析\n"
+        "\n"
+        f"{svg}\n\n"
+        f"- 样本范围：近 {result['lookback']} 根K线，按换手衰减模型估算筹码分布\n"
+        f"- 模型参数：历史换手衰减系数 {result['decay_coefficient']}，当日成本分布={result['distribution_method']}\n"
+        f"- 当前价：{result['current_price']}\n"
+        f"- 峰型：{result['peak_shape']}；主筹码峰：{result['main_peak_price']}，峰值权重约 {result['main_peak_ratio']}%\n"
+        f"- 次筹码峰：{result['secondary_peak_price']}，峰值权重约 {result['secondary_peak_ratio']}%\n"
+        f"- 70%成本区间：{cost_70_low} - {cost_70_high}，集中度 {result['cost_70_concentration_pct']}%\n"
+        f"- 90%成本区间：{cost_90_low} - {cost_90_high}，集中度 {result['cost_90_concentration_pct']}%\n"
+        f"- 区间重合度：{result['cost_overlap_ratio']}；前三峰权重合计约 {result['chip_concentration_top3']}%\n"
+        f"- 获利盘比例：约 {result['winner_ratio_pct']}%，上方压力筹码约 {result['pressure_ratio_pct']}%\n"
+        f"- 当前价相对主峰：{result['price_vs_peak_pct']}%，近端主峰迁移：{result['peak_shift_pct']}%\n"
+        f"- 底部筹码峰保留：{result['bottom_peak_retention_pct']}%，近期量能变化：{result['recent_volume_ratio']}倍\n"
+        f"- 主峰支撑区：{support_low} - {support_high}\n"
+        f"- 主要压力区：{pressure_low} - {pressure_high}\n"
+        f"- 主力动向：{result['main_force_signal']}\n"
+        "- 说明：该指标基于K线换手衰减模型近似估算，不等同于真实逐笔持仓成本；需结合量能、K线、基本面和市场环境验证。\n"
+    )
+
+
 def last_values(df: pd.DataFrame, columns: List[str]) -> Dict[str, Any]:
     if df.empty:
         return {c: None for c in columns}
@@ -350,4 +813,3 @@ def add_all_indicators(df: pd.DataFrame, close_col: str = 'close',
     df['boll_lower'] = boll_df['boll_lower']
 
     return df
-

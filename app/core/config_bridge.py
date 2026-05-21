@@ -56,6 +56,9 @@ def bridge_config_to_env():
         logger.info(f"  ✓ 桥接 MONGODB_DATABASE_NAME: {mongodb_db_name}")
         bridged_count += 1
 
+        # 先应用默认时区兜底；若数据库系统设置中有 app_timezone，后续会再次覆盖。
+        bridged_count += _bridge_timezone_settings({})
+
         # 1. 桥接大模型配置（基础 API 密钥）
         # 🔧 [优先级] .env 文件 > 数据库厂家配置
         # 🔥 修改：从数据库的 llm_providers 集合读取厂家配置，而不是从 JSON 文件
@@ -315,6 +318,13 @@ def _bridge_datasource_details(data_source_configs) -> int:
         # 注意：字段名是 type 而不是 source_type
         source_type = ds_config.type.value.upper()
 
+        # API 端点
+        if ds_config.endpoint:
+            env_key = f"{source_type}_API_URL"
+            os.environ[env_key] = str(ds_config.endpoint).rstrip("/")
+            logger.debug(f"  ✓ 桥接 {env_key}: {os.environ[env_key]}")
+            bridged_count += 1
+
         # 超时时间
         if ds_config.timeout:
             env_key = f"{source_type}_TIMEOUT"
@@ -335,6 +345,20 @@ def _bridge_datasource_details(data_source_configs) -> int:
             os.environ[env_key] = str(ds_config.config_params['max_retries'])
             logger.debug(f"  ✓ 桥接 {env_key}: {ds_config.config_params['max_retries']}")
             bridged_count += 1
+
+        # 敏感扩展配置（例如 Tushare 网页爬虫 Cookie）
+        try:
+            from app.utils.datasource_sensitive_config import bridge_sensitive_config_params_to_env
+
+            bridged_sensitive_count = bridge_sensitive_config_params_to_env(
+                ds_config.type,
+                ds_config.config_params or {},
+            )
+            if bridged_sensitive_count:
+                logger.info(f"  ✓ 桥接 {source_type} 敏感扩展配置: {bridged_sensitive_count} 项")
+                bridged_count += bridged_sensitive_count
+        except Exception as e:
+            logger.warning(f"  ⚠️  桥接 {source_type} 敏感扩展配置失败: {e}")
 
         # 缓存 TTL（从 config_params 中获取）
         if ds_config.config_params and 'cache_ttl' in ds_config.config_params:
@@ -443,10 +467,7 @@ def _bridge_system_settings() -> int:
                 logger.debug(f"  ⚠️  配置键 {setting_key} 不存在于系统设置中")
 
         # 时区配置
-        if 'app_timezone' in system_settings:
-            os.environ['APP_TIMEZONE'] = system_settings['app_timezone']
-            logger.debug(f"  ✓ 桥接 APP_TIMEZONE: {system_settings['app_timezone']}")
-            bridged_count += 1
+        bridged_count += _bridge_timezone_settings(system_settings)
 
         # 货币偏好
         if 'currency_preference' in system_settings:
@@ -495,6 +516,48 @@ def _bridge_system_settings() -> int:
         return 0
 
 
+def _bridge_timezone_settings(system_settings: dict | None = None) -> int:
+    """
+    Bridge the app timezone into all runtime aliases used by backend and
+    TradingAgents modules. Defaults to Beijing time.
+    """
+    from app.core.config import settings
+
+    configured = None
+    if isinstance(system_settings, dict):
+        configured = (
+            system_settings.get("app_timezone")
+            or system_settings.get("APP_TIMEZONE")
+            or system_settings.get("timezone")
+            or system_settings.get("TIMEZONE")
+        )
+
+    timezone_name = str(configured or settings.TIMEZONE or "Asia/Shanghai").strip() or "Asia/Shanghai"
+
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(timezone_name)
+    except Exception:
+        logger.warning(f"  ⚠️  时区配置无效: {timezone_name}，回退到 Asia/Shanghai")
+        timezone_name = "Asia/Shanghai"
+
+    bridged_count = 0
+    for env_key in ("APP_TIMEZONE", "TIMEZONE", "TA_TIMEZONE", "TZ"):
+        if os.environ.get(env_key) != timezone_name:
+            os.environ[env_key] = timezone_name
+            bridged_count += 1
+
+    try:
+        import time
+        if hasattr(time, "tzset"):
+            time.tzset()
+    except Exception as e:
+        logger.debug(f"  ⚠️  应用进程时区失败: {e}")
+
+    logger.info(f"  ✓ 桥接时区配置: {timezone_name}")
+    return bridged_count
+
+
 def get_bridged_api_key(provider: str) -> Optional[str]:
     """
     获取桥接的 API 密钥
@@ -540,9 +603,13 @@ def clear_bridged_config():
         'TRADINGAGENTS_DEEP_MODEL',
         # 数据源 API 密钥
         'TUSHARE_TOKEN',
+        'TUSHARE_WEB_COOKIE',
         'FINNHUB_API_KEY',
         # 系统配置
         'APP_TIMEZONE',
+        'TIMEZONE',
+        'TA_TIMEZONE',
+        'TZ',
         'CURRENCY_PREFERENCE',
     ]
 
@@ -737,5 +804,5 @@ __all__ = [
     'clear_bridged_config',
     'reload_bridged_config',
     'sync_pricing_config_now',
+    '_bridge_timezone_settings',
 ]
-

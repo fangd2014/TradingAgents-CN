@@ -13,6 +13,42 @@ from tradingagents.utils.logging_init import get_logger
 logger = get_logger("agents.utils.memory")
 
 
+def _is_valid_api_key(api_key: Optional[str]) -> bool:
+    """Return whether an API key is usable instead of a placeholder/display value."""
+    if not api_key:
+        return False
+    api_key = str(api_key).strip()
+    return (
+        len(api_key) > 10
+        and not api_key.startswith(("your_", "your-"))
+        and not api_key.endswith(("_here", "-here"))
+        and "..." not in api_key
+    )
+
+
+def _provider_api_key_from_config(config: Dict, provider: str) -> Optional[str]:
+    """Resolve an API key from runtime analysis config before falling back to env."""
+    provider = (provider or "").lower()
+    if provider in {"dashscope", "qwen", "alibaba"}:
+        for key_name in ("embedding_api_key", "quick_api_key", "deep_api_key"):
+            api_key = config.get(key_name)
+            if _is_valid_api_key(api_key):
+                return str(api_key).strip()
+    return None
+
+
+def _dashscope_api_key(config: Dict, provider: str) -> Optional[str]:
+    """Resolve the DashScope key used by memory embeddings."""
+    config_key = _provider_api_key_from_config(config, provider)
+    if config_key:
+        return config_key
+
+    env_key = os.getenv("DASHSCOPE_API_KEY")
+    if _is_valid_api_key(env_key):
+        return env_key.strip()
+    return None
+
+
 class ChromaDBManager:
     """单例ChromaDB管理器，避免并发创建集合的冲突"""
 
@@ -109,12 +145,12 @@ class FinancialSituationMemory:
         # 初始化降级选项标志
         self.fallback_available = False
         
-        if self.llm_provider == "dashscope" or self.llm_provider == "alibaba":
+        if self.llm_provider in {"dashscope", "qwen", "alibaba"}:
             self.embedding = "text-embedding-v3"
             self.client = None  # DashScope不需要OpenAI客户端
 
             # 设置DashScope API密钥
-            dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+            dashscope_key = _dashscope_api_key(config, self.llm_provider)
             if dashscope_key:
                 try:
                     # 尝试导入和初始化DashScope
@@ -146,7 +182,7 @@ class FinancialSituationMemory:
         elif self.llm_provider == "qianfan":
             # 千帆（文心一言）embedding配置
             # 千帆目前没有独立的embedding API，使用阿里百炼作为降级选项
-            dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+            dashscope_key = _dashscope_api_key(config, self.llm_provider)
             if dashscope_key:
                 try:
                     # 使用阿里百炼嵌入服务作为千帆的embedding解决方案
@@ -176,7 +212,7 @@ class FinancialSituationMemory:
 
             if not force_openai:
                 # 尝试使用阿里百炼嵌入
-                dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+                dashscope_key = _dashscope_api_key(config, self.llm_provider)
                 if dashscope_key:
                     try:
                         # 测试阿里百炼是否可用
@@ -228,7 +264,7 @@ class FinancialSituationMemory:
                         logger.info(f"🚨 未找到可用的嵌入服务，内存功能已禁用")
         elif self.llm_provider == "google":
             # Google AI使用阿里百炼嵌入（如果可用），否则禁用记忆功能
-            dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+            dashscope_key = _dashscope_api_key(config, self.llm_provider)
             openai_key = os.getenv('OPENAI_API_KEY')
             
             if dashscope_key:
@@ -267,7 +303,7 @@ class FinancialSituationMemory:
                 logger.info(f"💡 系统将继续运行，但不会保存或检索历史记忆")
         elif self.llm_provider == "openrouter":
             # OpenRouter支持：优先使用阿里百炼嵌入，否则禁用记忆功能
-            dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+            dashscope_key = _dashscope_api_key(config, self.llm_provider)
             if dashscope_key:
                 try:
                     # 尝试使用阿里百炼嵌入
@@ -348,6 +384,23 @@ class FinancialSituationMemory:
         logger.warning(f"⚠️ 强制截断：保留首尾关键信息，{len(text)}字符截断为{len(truncated)}字符")
         return truncated, True
 
+    def _is_auth_error(self, error_text: str) -> bool:
+        """Detect authentication failures from embedding providers."""
+        text = str(error_text or "").lower()
+        return (
+            "401" in text
+            or "unauthorized" in text
+            or "invalid_api_key" in text
+            or "incorrect api key" in text
+            or "api key provided" in text
+        )
+
+    def _disable_embedding_after_auth_error(self, error_text: str) -> None:
+        """Disable this memory instance after an auth failure to avoid repeated 401s."""
+        logger.error(f"❌ {self.llm_provider} embedding认证失败，已禁用本次记忆向量化: {error_text}")
+        self.client = "DISABLED"
+        logger.warning("⚠️ 记忆功能降级，后续将返回空向量")
+
     def get_embedding(self, text):
         """Get embedding for a text using the configured provider"""
 
@@ -397,6 +450,7 @@ class FinancialSituationMemory:
         }
 
         if (self.llm_provider == "dashscope" or
+            self.llm_provider == "qwen" or
             self.llm_provider == "alibaba" or
             self.llm_provider == "qianfan" or
             (self.llm_provider == "google" and self.client is None) or
@@ -428,6 +482,9 @@ class FinancialSituationMemory:
                 else:
                     # API返回错误状态码
                     error_msg = f"{response.code} - {response.message}"
+                    if self._is_auth_error(error_msg):
+                        self._disable_embedding_after_auth_error(error_msg)
+                        return [0.0] * 1024
                     
                     # 检查是否为长度限制错误
                     if any(keyword in error_msg.lower() for keyword in ['length', 'token', 'limit', 'exceed']):
@@ -457,6 +514,9 @@ class FinancialSituationMemory:
 
             except Exception as e:
                 error_str = str(e).lower()
+                if self._is_auth_error(error_str):
+                    self._disable_embedding_after_auth_error(str(e))
+                    return [0.0] * 1024
                 
                 # 检查是否为长度限制错误
                 if any(keyword in error_str for keyword in ['length', 'token', 'limit', 'exceed', 'too long']):
@@ -513,6 +573,9 @@ class FinancialSituationMemory:
 
             except Exception as e:
                 error_str = str(e).lower()
+                if self._is_auth_error(error_str):
+                    self._disable_embedding_after_auth_error(str(e))
+                    return [0.0] * 1024
                 
                 # 检查是否为长度限制错误
                 length_error_keywords = [

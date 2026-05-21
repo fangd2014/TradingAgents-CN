@@ -43,18 +43,12 @@ class TushareAdapter(DataSourceAdapter):
 
     def is_available(self) -> bool:
         """Check whether Tushare is available"""
-        # 如果未连接，尝试连接
-        if self._provider and not getattr(self._provider, "connected", False):
-            try:
-                self._provider.connect_sync()
-            except Exception as e:
-                logger.debug(f"Tushare: Auto-connect failed: {e}")
-
-        return (
-            self._provider is not None
-            and getattr(self._provider, "connected", False)
-            and self._provider.api is not None
-        )
+        # 轻量可用性检查：启动和调度器枚举数据源时不访问外部 Tushare。
+        # 实际取数入口会在 get_stock_list/get_daily_basic 等方法中按需连接。
+        if self._provider is None:
+            return False
+        token = self._provider._get_token_from_database() or self._provider.config.get("token")
+        return bool(token and not str(token).startswith("your_"))
 
     def get_stock_list(self) -> Optional[pd.DataFrame]:
         """Get stock list"""
@@ -85,7 +79,7 @@ class TushareAdapter(DataSourceAdapter):
             return None
         try:
             # 🔥 新增 ps, ps_ttm, total_share, float_share 字段
-            fields = "ts_code,total_mv,circ_mv,pe,pb,ps,turnover_rate,volume_ratio,pe_ttm,pb_mrq,ps_ttm,total_share,float_share"
+            fields = "ts_code,total_mv,circ_mv,pe,pb,ps,turnover_rate,volume_ratio,pe_ttm,ps_ttm,total_share,float_share"
             df = self._provider.api.daily_basic(trade_date=trade_date, fields=fields)
             if df is not None and not df.empty:
                 logger.info(
@@ -293,21 +287,25 @@ class TushareAdapter(DataSourceAdapter):
         return items if items else None
 
     def find_latest_trade_date(self) -> Optional[str]:
-        """Find latest trade date by probing Tushare"""
+        """Find the previous open trading date from Tushare trade calendar."""
         if not self.is_available():
             return None
         try:
             today = datetime.now()
-            for delta in range(0, 10):  # up to 10 days back
-                d = (today - timedelta(days=delta)).strftime("%Y%m%d")
-                try:
-                    db = self._provider.api.daily_basic(trade_date=d, fields="ts_code,total_mv")
-                    if db is not None and not db.empty:
-                        logger.info(f"Tushare: Found latest trade date: {d}")
-                        return d
-                except Exception:
-                    continue
+            start = (today - timedelta(days=30)).strftime("%Y%m%d")
+            end = (today - timedelta(days=1)).strftime("%Y%m%d")
+            cal = self._provider.api.trade_cal(
+                exchange="SSE",
+                start_date=start,
+                end_date=end,
+                fields="cal_date,is_open",
+            )
+            if cal is not None and not cal.empty:
+                open_days = cal[cal["is_open"].astype(str) == "1"].copy()
+                if not open_days.empty:
+                    latest = str(open_days["cal_date"].max())
+                    logger.info(f"Tushare: Found previous open trade date from trade_cal: {latest}")
+                    return latest
         except Exception as e:
             logger.error(f"Tushare: Failed to find latest trade date: {e}")
         return None
-

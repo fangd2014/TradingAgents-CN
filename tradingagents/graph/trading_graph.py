@@ -8,7 +8,12 @@ from typing import Dict, Any, Tuple, List, Optional
 import time
 
 from tradingagents.llm_clients import create_llm_client
-from tradingagents.llm_clients.provider_keys import env_key_for_provider, normalize_provider_key
+from tradingagents.llm_clients.provider_keys import (
+    env_key_for_provider,
+    normalize_backend_url_for_provider,
+    normalize_model_name_for_provider,
+    normalize_provider_key,
+)
 
 from langgraph.prebuilt import ToolNode
 
@@ -56,6 +61,15 @@ def create_llm_by_provider(provider: str, model: str, backend_url: str, temperat
     logger.info(f"🔑 [API Key] 来源: {'数据库配置' if api_key else '环境变量'}")
 
     normalized_provider = normalize_provider_key(provider)
+    normalized_backend_url = normalize_backend_url_for_provider(normalized_provider, backend_url)
+    if normalized_backend_url != (str(backend_url).strip().rstrip("/") if backend_url else ""):
+        logger.warning(f"⚠️ [创建LLM] 已规范化 provider={normalized_provider} 的 API 地址: {backend_url} -> {normalized_backend_url}")
+    backend_url = normalized_backend_url
+
+    normalized_model = normalize_model_name_for_provider(normalized_provider, model)
+    if normalized_model != model:
+        logger.info(f"✅ [创建LLM] 规范化模型代码: {model} -> {normalized_model}")
+        model = normalized_model
 
     if normalized_provider in {"openai", "siliconflow", "openrouter", "aihubmix", "ollama", "deepseek", "qwen", "glm", "custom_openai", "qianfan"}:
         if not api_key:
@@ -530,6 +544,7 @@ class TradingAgentsGraph:
             logger.info(f"✅ [自定义厂家 {provider_name}] 已配置自定义端点并应用用户配置的模型参数")
         
         self.toolkit = Toolkit(config=self.config)
+        self.role_llms = self._create_role_llms()
 
         # Initialize memories (如果启用)
         memory_enabled = self.config.get("memory_enabled", True)
@@ -574,6 +589,7 @@ class TradingAgentsGraph:
             self.conditional_logic,
             self.config,
             getattr(self, 'react_llm', None),
+            self.role_llms,
         )
 
         self.propagator = Propagator()
@@ -587,6 +603,37 @@ class TradingAgentsGraph:
 
         # Set up the graph
         self.graph = self.graph_setup.setup_graph(selected_analysts)
+
+    def _create_role_llms(self) -> Dict[str, Any]:
+        """Create LLM instances for role-specific model overrides."""
+        role_llm_configs = self.config.get("role_llm_configs") or {}
+        if not role_llm_configs:
+            return {}
+
+        role_llms = {}
+        for role_name, role_config in role_llm_configs.items():
+            model_name = role_config.get("model")
+            provider = role_config.get("provider") or self.config.get("llm_provider")
+            if not model_name or not provider:
+                logger.warning(f"⚠️ [角色模型] {role_name} 配置不完整，跳过")
+                continue
+
+            model_config = role_config.get("model_config") or self.config.get("quick_model_config", {})
+            try:
+                role_llms[role_name] = create_llm_by_provider(
+                    provider=provider,
+                    model=model_name,
+                    backend_url=role_config.get("backend_url") or self.config.get("backend_url", ""),
+                    temperature=model_config.get("temperature", 0.7),
+                    max_tokens=model_config.get("max_tokens", 4000),
+                    timeout=model_config.get("timeout", 180),
+                    api_key=role_config.get("api_key"),
+                )
+                logger.info(f"✅ [角色模型] {role_name} 使用独立模型: {provider}/{model_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ [角色模型] {role_name} 创建失败: {e}，回退到快速模型")
+
+        return role_llms
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
         """Create tool nodes for different data sources.

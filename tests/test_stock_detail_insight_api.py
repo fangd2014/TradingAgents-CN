@@ -58,3 +58,30 @@ async def test_technical_factors_endpoint_wraps_service(monkeypatch):
 
     assert response["success"] is True
     assert response["data"]["magic_nine"] == {}
+
+
+@pytest.mark.asyncio
+async def test_shareholders_endpoint_wraps_service(monkeypatch):
+    class FakeService:
+        async def get_shareholders(self, code, scope="top10", periods=4, refresh=False):
+            return {
+                "code": code,
+                "scope": scope,
+                "status": "ok",
+                "latest_period": "20251231",
+                "latest": [],
+            }
+
+    monkeypatch.setattr(stocks, "get_stock_shareholder_service", lambda: FakeService())
+
+    response = await stocks.get_shareholders(
+        "688049",
+        scope="float_top10",
+        periods=4,
+        refresh=False,
+        current_user={"id": "u1"},
+    )
+
+    assert response["success"] is True
+    assert response["data"]["scope"] == "float_top10"
+    assert response["data"]["latest_period"] == "20251231"

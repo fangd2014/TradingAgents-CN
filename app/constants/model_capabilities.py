@@ -185,6 +185,22 @@ DEFAULT_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
     },
     
     # ==================== DeepSeek ====================
+    "deepseek-v4-flash": {
+        "capability_level": 4,
+        "suitable_roles": [ModelRole.BOTH],
+        "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT, ModelFeature.REASONING, ModelFeature.FAST_RESPONSE],
+        "recommended_depths": ["基础", "标准", "深度"],
+        "performance_metrics": {"speed": 5, "cost": 4, "quality": 4},
+        "description": "DeepSeek V4 Flash，快速通用模型"
+    },
+    "deepseek-v4-pro": {
+        "capability_level": 5,
+        "suitable_roles": [ModelRole.DEEP_ANALYSIS],
+        "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT, ModelFeature.REASONING],
+        "recommended_depths": ["标准", "深度", "全面"],
+        "performance_metrics": {"speed": 3, "cost": 3, "quality": 5},
+        "description": "DeepSeek V4 Pro，高级推理模型"
+    },
     "deepseek-chat": {
         "capability_level": 3,
         "suitable_roles": [ModelRole.BOTH],
@@ -464,4 +480,3 @@ def parse_aggregator_model(model_name: str) -> Tuple[str, str]:
         parts = model_name.split("/", 1)
         return parts[0], parts[1]
     return "", model_name
-

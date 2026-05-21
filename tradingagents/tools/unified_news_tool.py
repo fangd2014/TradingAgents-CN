@@ -11,6 +11,80 @@ import re
 
 logger = logging.getLogger(__name__)
 
+
+def get_tushare_news_for_unified_tool(stock_code: str, max_news: int = 10, hours_back: int = 24):
+    """Fetch stock news through the Tushare provider for the unified news analyzer."""
+    import asyncio
+    import concurrent.futures
+
+    def run_in_isolated_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            from tradingagents.dataflows.providers.china.tushare import get_tushare_provider
+
+            provider = get_tushare_provider()
+            if not provider or not provider.is_available():
+                logger.warning("[统一新闻工具] Tushare Provider 不可用")
+                return []
+
+            return loop.run_until_complete(
+                provider.get_stock_news(symbol=stock_code, limit=max_news, hours_back=hours_back)
+            ) or []
+        finally:
+            loop.close()
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(run_in_isolated_loop)
+    try:
+        return future.result(timeout=35)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def get_tushare_web_news_for_unified_tool(stock_code: str, max_news: int = 10):
+    """Fetch Tushare website news for the unified news analyzer."""
+    from tradingagents.dataflows.news.tushare_web import get_tushare_web_news
+
+    return get_tushare_web_news(symbol=stock_code, limit=max_news)
+
+
+def format_tushare_news_items(stock_code: str, news_items, source_label: str = "Tushare新闻") -> str:
+    """Format Tushare news items for analyst consumption."""
+    if not news_items:
+        return ""
+
+    report = f"# {stock_code} 最新新闻 ({source_label})\n\n"
+    report += f"📅 查询时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    report += f"📊 新闻数量: {len(news_items)} 条\n\n"
+
+    for index, news in enumerate(news_items, 1):
+        title = news.get("title") or "无标题"
+        source = news.get("source") or "Tushare网页"
+        publish_time = news.get("publish_time") or news.get("time") or ""
+        summary = news.get("summary") or news.get("content") or ""
+        url = news.get("url") or ""
+
+        report += f"## {index}. {title}\n\n"
+        report += f"**来源**: {source}"
+        if publish_time:
+            report += f" | **时间**: {publish_time}"
+        if url:
+            report += f" | [原文链接]({url})"
+        report += "\n\n"
+        if summary:
+            summary_preview = str(summary)[:500] + "..." if len(str(summary)) > 500 else str(summary)
+            report += f"{summary_preview}\n\n"
+        report += "---\n\n"
+
+    return report
+
+
+def format_tushare_web_news_items(stock_code: str, news_items) -> str:
+    """Format Tushare website news items for analyst consumption."""
+    return format_tushare_news_items(stock_code, news_items, "Tushare网页")
+
+
 class UnifiedNewsAnalyzer:
     """统一新闻分析器，整合所有新闻获取逻辑"""
     
@@ -279,6 +353,32 @@ class UnifiedNewsAnalyzer:
             logger.error(traceback.format_exc())
             return False
 
+    def _get_news_from_tushare(self, stock_code: str, max_news: int, model_info: str = "") -> str:
+        """获取Tushare新闻，优先Tushare Provider，失败后再直接尝试网页爬虫。"""
+        try:
+            logger.info(f"[统一新闻工具] 📰 调用Tushare Provider获取 {stock_code} 的新闻...")
+            news_items = get_tushare_news_for_unified_tool(stock_code, max_news)
+            tushare_news = format_tushare_news_items(stock_code, news_items, "Tushare")
+            if tushare_news and len(tushare_news.strip()) > 100:
+                logger.info(f"[统一新闻工具] ✅ Tushare新闻获取成功: {len(news_items)} 条")
+                return self._format_news_result(tushare_news, "Tushare新闻", model_info)
+            logger.info(f"[统一新闻工具] ⚠️ Tushare Provider未返回可用新闻，尝试Tushare网页新闻...")
+        except Exception as tushare_error:
+            logger.warning(f"[统一新闻工具] ⚠️ Tushare Provider新闻获取失败: {tushare_error}")
+
+        try:
+            logger.info(f"[统一新闻工具] 尝试Tushare网页新闻...")
+            news_items = get_tushare_web_news_for_unified_tool(stock_code, max_news)
+            tushare_news = format_tushare_web_news_items(stock_code, news_items)
+            if tushare_news and len(tushare_news.strip()) > 100:
+                logger.info(f"[统一新闻工具] ✅ Tushare网页新闻获取成功: {len(news_items)} 条")
+                return self._format_news_result(tushare_news, "Tushare网页新闻", model_info)
+            logger.info(f"[统一新闻工具] ⚠️ Tushare网页新闻未返回可用数据")
+        except Exception as e:
+            logger.warning(f"[统一新闻工具] Tushare网页新闻获取失败: {e}")
+
+        return ""
+
     def _get_a_share_news(self, stock_code: str, max_news: int, model_info: str = "") -> str:
         """获取A股新闻"""
         logger.info(f"[统一新闻工具] 获取A股 {stock_code} 新闻")
@@ -294,7 +394,11 @@ class UnifiedNewsAnalyzer:
                 logger.info(f"[统一新闻工具] ✅ 数据库新闻获取成功: {len(db_news)} 字符")
                 return self._format_news_result(db_news, "数据库缓存", model_info)
             else:
-                logger.info(f"[统一新闻工具] ⚠️ 数据库中没有 {stock_code} 的新闻，尝试同步...")
+                logger.info(f"[统一新闻工具] ⚠️ 数据库中没有 {stock_code} 的新闻，优先尝试Tushare...")
+
+                tushare_result = self._get_news_from_tushare(stock_code, max_news, model_info)
+                if tushare_result:
+                    return tushare_result
 
                 # 🔥 数据库没有数据时，调用同步服务同步新闻
                 try:
@@ -318,7 +422,12 @@ class UnifiedNewsAnalyzer:
         except Exception as e:
             logger.warning(f"[统一新闻工具] 数据库新闻获取失败: {e}")
 
-        # 优先级1: 东方财富实时新闻
+        # 优先级1: Tushare Provider / 官网新闻页爬虫
+        tushare_result = self._get_news_from_tushare(stock_code, max_news, model_info)
+        if tushare_result:
+            return tushare_result
+
+        # 优先级2: 东方财富实时新闻
         try:
             if hasattr(self.toolkit, 'get_realtime_stock_news'):
                 logger.info(f"[统一新闻工具] 尝试东方财富实时新闻...")
@@ -337,7 +446,7 @@ class UnifiedNewsAnalyzer:
         except Exception as e:
             logger.warning(f"[统一新闻工具] 东方财富新闻获取失败: {e}")
         
-        # 优先级2: Google新闻（中文搜索）
+        # 优先级3: Google新闻（中文搜索）
         try:
             if hasattr(self.toolkit, 'get_google_news'):
                 logger.info(f"[统一新闻工具] 尝试Google新闻...")
@@ -350,7 +459,7 @@ class UnifiedNewsAnalyzer:
         except Exception as e:
             logger.warning(f"[统一新闻工具] Google新闻获取失败: {e}")
         
-        # 优先级3: OpenAI全球新闻
+        # 优先级4: OpenAI全球新闻
         try:
             if hasattr(self.toolkit, 'get_global_news_openai'):
                 logger.info(f"[统一新闻工具] 尝试OpenAI全球新闻...")
@@ -578,7 +687,7 @@ def create_unified_news_tool(toolkit):
 功能:
 - 自动识别股票类型（A股/港股/美股）
 - 根据股票类型选择最佳新闻源
-- A股: 优先东方财富 -> Google中文 -> OpenAI
+- A股: 优先数据库缓存 -> Tushare Provider -> Tushare网页 -> 东方财富 -> Google中文 -> OpenAI
 - 港股: 优先Google -> OpenAI -> 实时新闻
 - 美股: 优先OpenAI -> Google英文 -> FinnHub
 - 返回格式化的新闻内容

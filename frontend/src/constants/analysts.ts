@@ -41,7 +41,7 @@ export const ANALYSTS: Analyst[] = [
 export const ANALYST_NAMES = ANALYSTS.map(analyst => analyst.name)
 
 // 默认选中的分析师
-export const DEFAULT_ANALYSTS = ['市场分析师', '基本面分析师']
+export const DEFAULT_ANALYSTS = ['市场分析师', '基本面分析师', '新闻分析师']
 
 // 根据名称获取分析师信息
 export const getAnalystByName = (name: string): Analyst | undefined => {
@@ -101,7 +101,10 @@ export const MODEL_TO_PROVIDER_MAP: Record<string, string> = {
   'gemini-2.0-flash-thinking-exp': 'google',
 
   // DeepSeek
+  'deepseek-v4-flash': 'deepseek',
+  'deepseek-v4-pro': 'deepseek',
   'deepseek-chat': 'deepseek',
+  'deepseek-reasoner': 'deepseek',
   'deepseek-coder': 'deepseek',
 
   // 智谱AI

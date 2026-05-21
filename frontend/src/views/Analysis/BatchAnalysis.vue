@@ -50,13 +50,13 @@
                   v-model="stockInput"
                   type="textarea"
                   :rows="8"
-                  placeholder="请输入股票代码，每行一个&#10;支持格式：&#10;000001&#10;000002.SZ&#10;600036.SH&#10;AAPL&#10;TSLA"
+                  placeholder="请输入股票代码或名称，每行一个&#10;支持格式：&#10;贵州茅台&#10;平安银行&#10;000001&#10;AAPL&#10;腾讯控股"
                   @input="parseStockCodes"
                   class="stock-textarea"
                 />
                 <div class="input-actions">
                   <el-button type="primary" @click="parseStockCodes" size="small">
-                    解析股票代码
+                    解析股票
                   </el-button>
                   <el-button @click="clearStocks" size="small">清空</el-button>
                 </div>
@@ -84,7 +84,7 @@
               <!-- 无效代码提示 -->
               <div v-if="invalidCodes.length > 0" class="invalid-codes">
                 <el-alert
-                  title="以下股票代码格式可能有误，请检查："
+                  title="以下股票未能解析，请检查代码或名称："
                   type="warning"
                   :closable="false"
                 >
@@ -252,7 +252,7 @@
           <h3>股票预览 ({{ stockCodes.length }}只)</h3>
           <el-button type="text" @click="validateStocks">
             <el-icon><Check /></el-icon>
-            验证股票代码
+            解析股票
           </el-button>
         </div>
       </template>
@@ -278,9 +278,9 @@
 
       <div v-if="invalidCodes.length > 0" class="invalid-notice">
         <el-alert
-          title="发现无效股票代码"
+          title="发现未能解析的股票"
           type="warning"
-          :description="`以下股票代码可能无效：${invalidCodes.join(', ')}`"
+          :description="`以下股票代码或名称未能解析：${invalidCodes.join(', ')}`"
           show-icon
           :closable="false"
         />
@@ -300,6 +300,7 @@ import { useAuthStore } from '@/stores/auth'
 import ModelConfig from '@/components/ModelConfig.vue'
 import { getMarketByStockCode } from '@/utils/market'
 import { validateStockCode } from '@/utils/stockValidator'
+import { resolveStockInput } from '@/utils/stockInputResolver'
 
 // 路由实例（必须在顶层调用）
 const router = useRouter()
@@ -342,7 +343,7 @@ const normalizeCodeSmart = (raw: string): { symbol?: string; error?: string } =>
   return { error: v.message || '代码格式无效' }
 }
 
-const parseStockCodes = () => {
+const parseStockCodes = async () => {
   const codes = stockInput.value
     .split('\n')
     .map(code => code.trim())
@@ -353,12 +354,22 @@ const parseStockCodes = () => {
   const invalid: string[] = []
   for (const c of codes) {
     const { symbol } = normalizeCodeSmart(c)
-    if (symbol) normalized.push(symbol)
-    else invalid.push(c)
+    if (symbol) {
+      normalized.push(symbol)
+      continue
+    }
+
+    try {
+      const resolved = await resolveStockInput(c, 'A股')
+      normalized.push(resolved.symbol)
+    } catch {
+      invalid.push(c)
+    }
   }
 
-  stockCodes.value = normalized
-  symbols.value = [...normalized]
+  const unique = Array.from(new Set(normalized))
+  stockCodes.value = unique
+  symbols.value = [...unique]
   invalidCodes.value = invalid
 }
 
@@ -462,17 +473,27 @@ const validateStocks = async () => {
   const valid: string[] = []
   for (const c of stockCodes.value) {
     const { symbol } = normalizeCodeSmart(c)
-    if (symbol) valid.push(symbol)
-    else invalid.push(c)
+    if (symbol) {
+      valid.push(symbol)
+      continue
+    }
+
+    try {
+      const resolved = await resolveStockInput(c, 'A股')
+      valid.push(resolved.symbol)
+    } catch {
+      invalid.push(c)
+    }
   }
-  stockCodes.value = valid
-  symbols.value = [...valid]
+  const unique = Array.from(new Set(valid))
+  stockCodes.value = unique
+  symbols.value = [...unique]
   invalidCodes.value = invalid
 
   if (invalid.length === 0) {
-    ElMessage.success('所有股票代码验证通过')
+    ElMessage.success('所有股票已解析')
   } else {
-    ElMessage.warning(`发现 ${invalid.length} 个无效股票代码`)
+    ElMessage.warning(`发现 ${invalid.length} 个未能解析的股票`)
   }
 }
 
@@ -483,7 +504,7 @@ const submitBatchAnalysis = async () => {
   }
 
   if (stockCodes.value.length === 0) {
-    ElMessage.warning('请输入股票代码')
+    ElMessage.warning('请输入股票代码或名称')
     return
   }
 

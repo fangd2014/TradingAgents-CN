@@ -19,6 +19,8 @@ import logging
 from typing import Dict, List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.services.database.serialization import serialize_document
+
 logger = logging.getLogger("webapi")
 
 
@@ -213,8 +215,12 @@ class UnifiedStockService:
                     # 如果source不在优先级列表中，保持当前记录
                     pass
         
-        # 返回前 limit 条
-        result_list = list(unique_results.values())[:limit]
+        # 返回前 limit 条；移除 MongoDB 内部字段，避免响应序列化 ObjectId 失败
+        result_list = []
+        for doc in list(unique_results.values())[:limit]:
+            clean_doc = serialize_document(doc)
+            clean_doc.pop("_id", None)
+            result_list.append(clean_doc)
         logger.info(f"🔍 搜索 {market} 市场: '{query}' -> {len(result_list)} 条结果（已去重）")
         return result_list
 
@@ -283,4 +289,3 @@ class UnifiedStockService:
                 "timezone": "America/New_York"
             }
         ]
-

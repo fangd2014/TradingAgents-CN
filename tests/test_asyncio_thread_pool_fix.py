@@ -106,6 +106,36 @@ def test_multiple_threads():
             assert result == f"Task {i} completed"
 
 
+def test_run_async_provider_call_inside_running_event_loop():
+    """同步数据源接口在已有事件循环里也能调用 async provider。"""
+    manager = DataSourceManager()
+
+    async def provider_call():
+        await asyncio.sleep(0.01)
+        return "success"
+
+    async def caller():
+        return manager._run_async_provider_call(provider_call())
+
+    assert asyncio.run(caller()) == "success"
+
+
+def test_get_stock_data_unwraps_fallback_tuple(monkeypatch):
+    """fallback 返回 (文本, 数据源) 时，上层仍按字符串处理。"""
+    manager = DataSourceManager()
+    monkeypatch.setattr(manager, "_get_mongodb_data", lambda *args, **kwargs: ("❌ mock empty", None))
+    monkeypatch.setattr(
+        manager,
+        "_try_fallback_sources",
+        lambda *args, **kwargs: ("日期 股票代码 收盘价\n2025-01-02 600089 10.00", "tushare"),
+    )
+
+    result = manager.get_stock_data("600089", "2025-01-01", "2025-01-10")
+
+    assert isinstance(result, str)
+    assert "2025-01-02" in result
+
+
 if __name__ == "__main__":
     print("🧪 测试1: 线程池中的异步方法")
     test_asyncio_in_thread_pool()
@@ -120,4 +150,3 @@ if __name__ == "__main__":
     print("✅ 测试3通过\n")
     
     print("🎉 所有测试通过！")
-

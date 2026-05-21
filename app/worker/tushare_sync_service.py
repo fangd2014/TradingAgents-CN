@@ -4,8 +4,9 @@ Tushare数据同步服务
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable, Awaitable
 import logging
+import os
 
 from tradingagents.dataflows.providers.china.tushare import TushareProvider
 from app.services.stock_data_service import get_stock_data_service
@@ -548,7 +549,9 @@ class TushareSyncService:
         incremental: bool = True,
         all_history: bool = False,
         period: str = "daily",
-        job_id: str = None
+        job_id: str = None,
+        progress_callback: Optional[Callable[[int, str, Dict[str, Any]], Awaitable[None]]] = None,
+        sleep_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         同步历史数据
@@ -623,6 +626,12 @@ class TushareSyncService:
                     global_start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
             logger.info(f"📊 历史数据同步: 结束日期={end_date}, 股票数量={len(symbols)}, 模式={'增量' if incremental else '全量'}")
+            request_sleep = self._resolve_sleep_seconds(sleep_seconds, default=1.0)
+            sleep_source = "request_override" if sleep_seconds is not None else "data_source_config"
+            logger.info(
+                f"⏳ Tushare历史数据同步限速: 每只股票请求后 sleep {request_sleep:.2f} 秒 "
+                f"(source={sleep_source})"
+            )
 
             # 4. 批量处理
             for i, symbol in enumerate(symbols):
@@ -695,6 +704,19 @@ class TushareSyncService:
                             progress_percent,
                             f"正在同步 {symbol} ({i + 1}/{len(symbols)})"
                         )
+                    if progress_callback:
+                        await progress_callback(
+                            progress_percent,
+                            f"正在同步 {symbol} 日线行情 ({i + 1}/{len(symbols)})",
+                            {
+                                "current_item": symbol,
+                                "total_items": len(symbols),
+                                "processed_items": i + 1,
+                                "success_count": stats["success_count"],
+                                "error_count": stats["error_count"],
+                                "total_records": stats["total_records"],
+                            },
+                        )
 
                     # 每50个股票输出一次详细日志
                     if (i + 1) % 50 == 0 or (i + 1) == len(symbols):
@@ -726,6 +748,9 @@ class TushareSyncService:
                         f"   错误信息: {str(e)}\n"
                         f"   堆栈跟踪:\n{error_details}"
                     )
+                finally:
+                    if request_sleep > 0 and i + 1 < len(symbols):
+                        await asyncio.sleep(request_sleep)
 
             # 4. 完成统计
             stats["end_time"] = datetime.utcnow()
@@ -835,7 +860,14 @@ class TushareSyncService:
 
     # ==================== 财务数据同步 ====================
 
-    async def sync_financial_data(self, symbols: List[str] = None, limit: int = 20, job_id: str = None) -> Dict[str, Any]:
+    async def sync_financial_data(
+        self,
+        symbols: List[str] = None,
+        limit: int = 20,
+        job_id: str = None,
+        progress_callback: Optional[Callable[[int, str, Dict[str, Any]], Awaitable[None]]] = None,
+        sleep_seconds: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
         同步财务数据
 
@@ -872,6 +904,12 @@ class TushareSyncService:
 
             stats["total_processed"] = len(symbols)
             logger.info(f"📊 需要同步 {len(symbols)} 只股票财务数据")
+            request_sleep = self._resolve_sleep_seconds(sleep_seconds, default=1.0)
+            sleep_source = "request_override" if sleep_seconds is not None else "data_source_config"
+            logger.info(
+                f"⏳ Tushare财务数据同步限速: 每只股票请求后 sleep {request_sleep:.2f} 秒 "
+                f"(source={sleep_source})"
+            )
 
             # 批量处理
             for i, symbol in enumerate(symbols):
@@ -893,8 +931,8 @@ class TushareSyncService:
                         logger.warning(f"⚠️ {symbol}: 无财务数据")
 
                     # 进度日志和进度跟踪
+                    progress = int((i + 1) / len(symbols) * 100)
                     if (i + 1) % 20 == 0:
-                        progress = int((i + 1) / len(symbols) * 100)
                         logger.info(f"📈 财务数据同步进度: {i + 1}/{len(symbols)} ({progress}%) "
                                    f"(成功: {stats['success_count']}, 错误: {stats['error_count']})")
                         # 输出速率限制器统计
@@ -921,6 +959,19 @@ class TushareSyncService:
                                 stats["cancelled"] = True
                                 raise
 
+                    if progress_callback and ((i + 1) % 5 == 0 or (i + 1) == len(symbols)):
+                        await progress_callback(
+                            progress,
+                            f"正在同步 {symbol} 财务数据 ({i + 1}/{len(symbols)})",
+                            {
+                                "current_item": symbol,
+                                "total_items": len(symbols),
+                                "processed_items": i + 1,
+                                "success_count": stats["success_count"],
+                                "error_count": stats["error_count"],
+                            },
+                        )
+
                 except Exception as e:
                     stats["error_count"] += 1
                     stats["errors"].append({
@@ -929,6 +980,9 @@ class TushareSyncService:
                         "context": "sync_financial_data"
                     })
                     logger.error(f"❌ {symbol} 财务数据同步失败: {e}")
+                finally:
+                    if request_sleep > 0 and i + 1 < len(symbols):
+                        await asyncio.sleep(request_sleep)
 
             # 完成统计
             stats["end_time"] = datetime.utcnow()
@@ -979,6 +1033,53 @@ class TushareSyncService:
 
         threshold = datetime.utcnow() - timedelta(hours=hours)
         return updated_at > threshold
+
+    def _resolve_sleep_seconds(self, explicit_value: Optional[float], default: float) -> float:
+        """Resolve per-symbol sleep from the data-source rate_limit unless explicitly overridden."""
+        try:
+            if explicit_value is not None:
+                value = float(explicit_value)
+                return value if value >= 0 else default
+
+            # Config bridge stores DataSourceConfig.rate_limit (per minute) as requests per second.
+            # Example: rate_limit=200/min -> TUSHARE_RATE_LIMIT=3.333 rps -> sleep ~= 0.3s.
+            rate_limit_per_second = self._resolve_tushare_rate_limit_per_second()
+            if rate_limit_per_second and rate_limit_per_second > 0:
+                return max(0.0, 1.0 / rate_limit_per_second)
+
+            return default
+        except Exception:
+            return default
+
+    def _resolve_tushare_rate_limit_per_second(self) -> Optional[float]:
+        """Read Tushare rate limit from bridged env or active data-source config."""
+        env_value = os.getenv("TUSHARE_RATE_LIMIT")
+        if env_value:
+            try:
+                value = float(env_value)
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+
+        try:
+            from app.core.database import get_mongo_db_sync
+
+            db = get_mongo_db_sync()
+            config_data = db.system_configs.find_one(
+                {"is_active": True},
+                sort=[("version", -1)]
+            )
+            for ds in (config_data or {}).get("data_source_configs", []):
+                ds_type = str(ds.get("type") or "").lower()
+                if ds_type == "tushare" and ds.get("enabled", True):
+                    per_minute = float(ds.get("rate_limit") or 0)
+                    if per_minute > 0:
+                        return per_minute / 60.0
+        except Exception as exc:
+            logger.debug(f"读取Tushare数据源调用频率失败，使用默认限速: {exc}")
+
+        return None
 
     async def get_sync_status(self) -> Dict[str, Any]:
         """获取同步状态"""

@@ -86,8 +86,18 @@
       <el-table :data="filteredList" v-loading="loading" style="width: 100%" @selection-change="onSelectionChange">
         <el-table-column type="selection" width="50" />
         <el-table-column prop="task_id" label="任务ID" width="220" />
-        <el-table-column prop="stock_code" label="股票代码" width="120" />
-        <el-table-column prop="stock_name" label="股票名称" width="150" />
+        <el-table-column label="任务类型" width="110">
+          <template #default="{ row }">
+            <el-tag :type="row.task_type === 'screening' ? 'success' : 'info'" effect="plain">
+              {{ row.task_type === 'screening' ? '选股任务' : '分析任务' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="标的/策略" min-width="180">
+          <template #default="{ row }">
+            {{ getTaskDisplayName(row) }}
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)">{{ getStatusText(row.status) }}</el-tag>
@@ -106,7 +116,7 @@
         <el-table-column label="操作" width="350" fixed="right">
           <template #default="{ row }">
             <el-button v-if="row.status==='completed'" type="text" size="small" @click="openResult(row)">查看结果</el-button>
-            <el-button v-if="row.status==='completed'" type="text" size="small" @click="openReport(row)">报告详情</el-button>
+            <el-button v-if="row.status==='completed' && row.task_type !== 'screening'" type="text" size="small" @click="openReport(row)">报告详情</el-button>
             <el-button v-if="row.status==='failed'" type="text" size="small" @click="showErrorDetail(row)">查看错误</el-button>
             <el-button v-if="row.status==='failed'" type="text" size="small" @click="retryTask(row)">重试</el-button>
             <el-button v-if="row.status==='processing' || row.status==='running' || row.status==='pending'" type="text" size="small" @click="markAsFailed(row)">标记失败</el-button>
@@ -299,7 +309,7 @@ const loadList = async () => {
     // 统计
     const completed = tasks.filter((x:any) => x.status === 'completed').length
     const failed = tasks.filter((x:any) => x.status === 'failed').length
-    const uniqueStocks = new Set(tasks.map((x:any) => x.stock_code || x.stock_symbol)).size
+    const uniqueStocks = new Set(tasks.filter((x:any) => x.task_type !== 'screening').map((x:any) => x.stock_code || x.stock_symbol)).size
     stats.value = { total: tasks.length, completed, failed, uniqueStocks }
   } catch (e:any) {
     ElMessage.error(e?.message || '加载失败')
@@ -320,10 +330,17 @@ const filteredList = computed(() => {
   let arr = list.value
   if (keyword.value) {
     const k = keyword.value.toLowerCase()
-    arr = arr.filter((x:any) => (x.stock_code||'').toLowerCase().includes(k) || (x.stock_name||'').toLowerCase().includes(k) || (x.task_id||'').toLowerCase().includes(k))
+    arr = arr.filter((x:any) => (x.stock_code||'').toLowerCase().includes(k) || (x.stock_name||'').toLowerCase().includes(k) || (x.strategy_name||'').toLowerCase().includes(k) || (x.task_id||'').toLowerCase().includes(k))
   }
   return arr
 })
+
+const getTaskDisplayName = (row:any) => {
+  if (row.task_type === 'screening') {
+    return row.strategy_name || row.title || '选股任务'
+  }
+  return [row.stock_code || row.stock_symbol || '-', row.stock_name].filter(Boolean).join(' / ')
+}
 
 const handleSizeChange = (size:number) => { pageSize.value = size; currentPage.value = 1; loadList() }
 const handleCurrentChange = (page:number) => { currentPage.value = page; loadList() }
@@ -514,13 +531,13 @@ onUnmounted(() => {
 
 const getStatusType = (status:string): 'success' | 'info' | 'warning' | 'danger' => {
   const map: Record<string,'success'|'info'|'warning'|'danger'> = {
-    pending: 'info', processing: 'warning', completed: 'success', failed: 'danger', cancelled: 'info'
+    pending: 'info', processing: 'warning', running: 'warning', completed: 'success', failed: 'danger', cancelled: 'info'
   }
   return map[status] || 'info'
 }
 import { formatDateTime } from '@/utils/datetime'
 
-const getStatusText = (status:string) => ({ pending:'等待中', processing:'处理中', completed:'已完成', failed:'失败', cancelled:'已取消' } as any)[status] || status
+const getStatusText = (status:string) => ({ pending:'等待中', processing:'处理中', running:'处理中', completed:'已完成', failed:'失败', cancelled:'已取消' } as any)[status] || status
 const formatTime = (t:string) => t ? formatDateTime(t) : '-'
 </script>
 
@@ -534,4 +551,3 @@ const formatTime = (t:string) => t ? formatDateTime(t) : '-'
   .pagination-wrapper { display:flex; justify-content:center; margin-top: 16px; }
 }
 </style>
-

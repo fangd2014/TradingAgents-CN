@@ -152,15 +152,49 @@ class AKShareAdapter(DataSourceAdapter):
                             value = row.get('value', '')
                             info_dict[item] = value
                         latest_price = self._safe_float(info_dict.get('最新', 0))
-                        # 🔥 AKShare 的"总市值"单位是万元，需要转换为亿元（与 Tushare 一致）
+                        pre_close = self._safe_float(
+                            info_dict.get('昨收')
+                            or info_dict.get('昨收价')
+                            or info_dict.get('昨日收盘')
+                            or info_dict.get('昨日收盘价')
+                        )
+                        total_share_wan = self._safe_float(
+                            info_dict.get('总股本')
+                            or info_dict.get('总股本(万股)')
+                        )
+                        float_share_wan = self._safe_float(
+                            info_dict.get('流通股本')
+                            or info_dict.get('流通股')
+                            or info_dict.get('流通A股')
+                            or info_dict.get('流通股本(万股)')
+                        )
                         total_mv_wan = self._safe_float(info_dict.get('总市值', 0))  # 万元
-                        total_mv_yi = total_mv_wan / 10000 if total_mv_wan else None  # 转换为亿元
+                        if total_mv_wan is None and total_share_wan and pre_close:
+                            total_mv_wan = total_share_wan * pre_close
+
+                        # 与 Tushare daily_basic 保持一致：适配器返回市值单位为万元。
+                        # 写库层统一除以 10000 后存为亿元。
+                        circ_mv_wan = None
+                        if float_share_wan and pre_close:
+                            circ_mv_wan = float_share_wan * pre_close
+                        else:
+                            logger.debug(
+                                "AKShare: Cannot calculate circ_mv for %s, float_share=%s pre_close=%s info_keys=%s",
+                                symbol,
+                                float_share_wan,
+                                pre_close,
+                                list(info_dict.keys()),
+                            )
                         basic_data.append({
                             'ts_code': ts_code,
                             'trade_date': trade_date,
                             'name': name,
                             'close': latest_price,
-                            'total_mv': total_mv_yi,  # 亿元（与 Tushare 一致）
+                            'pre_close': pre_close,
+                            'total_mv': total_mv_wan,  # 万元（与 Tushare daily_basic 一致）
+                            'circ_mv': circ_mv_wan,  # 万元 = 流通股本(万股) * 昨日收盘价(元)
+                            'total_share': total_share_wan,
+                            'float_share': float_share_wan,
                             'turnover_rate': None,
                             'pe': None,
                             'pb': None,
@@ -389,4 +423,3 @@ class AKShareAdapter(DataSourceAdapter):
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
         logger.info(f"AKShare: Using yesterday as trade date: {yesterday}")
         return yesterday
-

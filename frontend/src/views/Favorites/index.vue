@@ -28,6 +28,7 @@
         <el-col :span="4">
           <el-select v-model="selectedMarket" placeholder="市场" clearable>
             <el-option label="A股" value="A股" />
+            <el-option label="A股ETF" value="A股ETF" />
             <el-option label="港股" value="港股" />
             <el-option label="美股" value="美股" />
           </el-select>
@@ -185,7 +186,7 @@
             </el-button>
             <!-- 只有A股显示同步按钮 -->
             <el-button
-              v-if="row.market === 'A股'"
+              v-if="isChinaMarket(row.market)"
               type="text"
               size="small"
               @click="showSingleSyncDialog(row)"
@@ -237,7 +238,7 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item label="股票代码" prop="stock_code">
+        <el-form-item label="股票" prop="stock_code">
           <el-input
             v-model="addForm.stock_code"
             :placeholder="getStockCodePlaceholder()"
@@ -250,8 +251,8 @@
 
         <el-form-item label="股票名称" prop="stock_name">
           <el-input v-model="addForm.stock_name" placeholder="股票名称" />
-          <div v-if="addForm.market !== 'A股'" style="font-size: 12px; color: #E6A23C; margin-top: 4px;">
-            {{ addForm.market }}不支持自动获取，请手动输入股票名称
+          <div v-if="addForm.market !== 'A股'" style="font-size: 12px; color: #909399; margin-top: 4px;">
+            可通过代码或名称搜索匹配；未匹配时请手动输入股票名称
           </div>
         </el-form-item>
 
@@ -513,6 +514,7 @@ import { favoritesApi } from '@/api/favorites'
 import { tagsApi } from '@/api/tags'
 import { stockSyncApi } from '@/api/stockSync'
 import { normalizeMarketForAnalysis } from '@/utils/market'
+import { resolveStockInput } from '@/utils/stockInputResolver'
 import { ApiClient } from '@/api/request'
 
 import type { FavoriteItem } from '@/api/favorites'
@@ -541,6 +543,9 @@ const selectedTag = ref('')
 const selectedMarket = ref('')
 const selectedBoard = ref('')
 const selectedExchange = ref('')
+
+const isChinaMarket = (market?: string) => market === 'A股' || market === 'A股ETF'
+const isAshareEtfCode = (code?: string) => /^(159\d{3}|(?:51|56|58)\d{4})$/.test(String(code || '').trim())
 
 // 批量选择
 const selectedStocks = ref<FavoriteItem[]>([])
@@ -582,12 +587,22 @@ const addForm = ref({
 // 股票代码验证器
 const validateStockCode = (_rule: any, value: any, callback: any) => {
   if (!value) {
-    callback(new Error('请输入股票代码'))
+    callback(new Error('请输入股票代码或名称'))
     return
   }
 
   const code = value.trim()
   const market = addForm.value.market
+  const looksLikeCode = market === 'A股'
+    ? /^\d+$/.test(code)
+    : market === '港股'
+      ? /^\d+(\.HK)?$/i.test(code)
+      : /^[A-Z.]+$/i.test(code)
+
+  if (!looksLikeCode) {
+    callback()
+    return
+  }
 
   if (market === 'A股') {
     // A股：6位数字
@@ -617,7 +632,7 @@ const addRules = {
     { required: true, message: '请选择市场类型', trigger: 'change' }
   ],
   stock_code: [
-    { required: true, message: '请输入股票代码', trigger: 'blur' },
+    { required: true, message: '请输入股票代码或名称', trigger: 'blur' },
     { validator: validateStockCode, trigger: 'blur' }
   ],
   stock_name: [
@@ -684,7 +699,7 @@ const filteredFavorites = computed<FavoriteItem[]>(() => {
 
 // 判断是否有A股自选股
 const hasAStocks = computed(() => {
-  return favorites.value.some(item => item.market === 'A股')
+  return favorites.value.some(item => isChinaMarket(item.market))
 })
 
 // 判断选中的股票是否都是A股
@@ -881,24 +896,24 @@ const handleMarketChange = () => {
 const getStockCodePlaceholder = () => {
   const market = addForm.value.market
   if (market === 'A股') {
-    return '请输入6位数字代码，如：000001'
+    return '请输入股票代码或名称，如：贵州茅台、000001、510300'
   } else if (market === '港股') {
-    return '请输入4位数字代码，如：0700'
+    return '请输入股票代码或名称，如：腾讯控股、0700'
   } else if (market === '美股') {
-    return '请输入股票代码，如：AAPL'
+    return '请输入股票代码或名称，如：Apple、AAPL'
   }
-  return '请输入股票代码'
+  return '请输入股票代码或名称'
 }
 
 // 获取股票代码输入提示文字
 const getStockCodeHint = () => {
   const market = addForm.value.market
   if (market === 'A股') {
-    return '输入代码后失焦，将自动填充股票名称'
+    return '输入代码或名称后失焦，将自动匹配股票并填充名称'
   } else if (market === '港股') {
-    return '港股不支持自动获取名称，请手动输入'
+    return '输入代码或名称后失焦，将自动匹配股票'
   } else if (market === '美股') {
-    return '美股不支持自动获取名称，请手动输入'
+    return '输入代码或名称后失焦，将自动匹配股票'
   }
   return ''
 }
@@ -907,11 +922,30 @@ const fetchStockInfo = async () => {
   if (!addForm.value.stock_code) return
 
   try {
-    const symbol = addForm.value.stock_code.trim()
     const market = addForm.value.market
+    const resolved = await resolveStockInput(addForm.value.stock_code, market as any)
+    addForm.value.stock_code = resolved.symbol
+    addForm.value.market = resolved.market
+    if (resolved.name) {
+      addForm.value.stock_name = resolved.name
+      ElMessage.success(`已匹配股票: ${resolved.name} (${resolved.symbol})`)
+      return
+    }
 
-    // 🔥 只有A股支持自动获取股票名称
+    const symbol = resolved.symbol
+
     if (market === 'A股') {
+      if (isAshareEtfCode(symbol)) {
+        const res = await ApiClient.get(`/api/stocks/${symbol}/quote`)
+        if ((res as any)?.success && (res as any)?.data?.name) {
+          addForm.value.stock_name = (res as any).data.name
+          ElMessage.success(`已自动填充ETF名称: ${(res as any).data.name}`)
+        } else {
+          ElMessage.warning('未找到该ETF信息，请手动输入名称')
+        }
+        return
+      }
+
       // 从后台获取股票基础信息
       const res = await ApiClient.get(`/api/stock-data/basic-info/${symbol}`)
 
@@ -929,7 +963,7 @@ const fetchStockInfo = async () => {
     // 港股和美股不调用API，用户需要手动输入
   } catch (error: any) {
     console.error('获取股票信息失败:', error)
-    ElMessage.warning('获取股票信息失败，请手动输入股票名称')
+    ElMessage.warning(error?.message || '获取股票信息失败，请手动输入股票名称')
   }
 }
 

@@ -17,6 +17,72 @@ logger = logging.getLogger("webapi")
 router = APIRouter(prefix="/favorites", tags=["自选股管理"])
 
 
+def _is_china_etf_code(stock_code: str) -> bool:
+    try:
+        from tradingagents.utils.stock_utils import StockUtils
+        return StockUtils.is_china_etf(stock_code)
+    except Exception:
+        code = str(stock_code or "").strip()
+        return len(code) == 6 and (
+            code.startswith("159")
+            or code.startswith("51")
+            or code.startswith("56")
+            or code.startswith("58")
+        )
+
+
+async def _sync_etf_realtime_quotes(symbols: List[str]) -> dict:
+    """同步A股ETF实时行情到 market_quotes。"""
+    if not symbols:
+        return {"success_count": 0, "failed_count": 0, "symbols": []}
+
+    from datetime import datetime
+    from app.core.database import get_mongo_db
+    from app.services.quotes_service import get_quotes_service
+
+    db = get_mongo_db()
+    quotes = await get_quotes_service().get_quotes(symbols)
+    success_count = 0
+    failed_symbols = []
+
+    for symbol in symbols:
+        code = str(symbol).zfill(6)
+        quote = quotes.get(code)
+        if not quote:
+            failed_symbols.append(code)
+            continue
+
+        quote_doc = {
+            "code": code,
+            "symbol": code,
+            "name": quote.get("name"),
+            "market": "A股ETF",
+            "instrument_type": "etf",
+            "close": quote.get("close"),
+            "price": quote.get("close"),
+            "current_price": quote.get("close"),
+            "pct_chg": quote.get("pct_chg"),
+            "change_percent": quote.get("pct_chg"),
+            "amount": quote.get("amount"),
+            "volume": quote.get("volume"),
+            "data_source": quote.get("source") or "akshare_fund_etf_spot_em",
+            "updated_at": datetime.utcnow(),
+        }
+        await db["market_quotes"].update_one(
+            {"code": code},
+            {"$set": quote_doc},
+            upsert=True,
+        )
+        success_count += 1
+
+    return {
+        "success_count": success_count,
+        "failed_count": len(failed_symbols),
+        "symbols": symbols,
+        "failed_symbols": failed_symbols,
+    }
+
+
 class AddFavoriteRequest(BaseModel):
     """添加自选股请求"""
     stock_code: str
@@ -251,34 +317,41 @@ async def sync_favorites_realtime(
 
         logger.info(f"🎯 需要同步的股票: {len(symbols)} 只 - {symbols}")
 
-        # 根据数据源选择同步服务
-        if request.data_source == "tushare":
-            from app.worker.tushare_sync_service import get_tushare_sync_service
-            service = await get_tushare_sync_service()
-        elif request.data_source == "akshare":
-            from app.worker.akshare_sync_service import get_akshare_sync_service
-            service = await get_akshare_sync_service()
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"不支持的数据源: {request.data_source}"
+        etf_symbols = [s for s in symbols if _is_china_etf_code(s)]
+        stock_symbols = [s for s in symbols if s not in etf_symbols]
+
+        etf_result = await _sync_etf_realtime_quotes(etf_symbols)
+        stock_result = {"success_count": 0, "failed_count": 0}
+
+        if stock_symbols:
+            # 根据数据源选择同步服务
+            if request.data_source == "tushare":
+                from app.worker.tushare_sync_service import get_tushare_sync_service
+                service = await get_tushare_sync_service()
+            elif request.data_source == "akshare":
+                from app.worker.akshare_sync_service import get_akshare_sync_service
+                service = await get_akshare_sync_service()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"不支持的数据源: {request.data_source}"
+                )
+
+            if not service:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"{request.data_source} 服务不可用"
+                )
+
+            # 同步实时行情
+            logger.info(f"🔄 调用 {request.data_source} 同步服务...")
+            stock_result = await service.sync_realtime_quotes(
+                symbols=stock_symbols,
+                force=True  # 强制执行，跳过交易时间检查
             )
 
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"{request.data_source} 服务不可用"
-            )
-
-        # 同步实时行情
-        logger.info(f"🔄 调用 {request.data_source} 同步服务...")
-        sync_result = await service.sync_realtime_quotes(
-            symbols=symbols,
-            force=True  # 强制执行，跳过交易时间检查
-        )
-
-        success_count = sync_result.get("success_count", 0)
-        failed_count = sync_result.get("failed_count", 0)
+        success_count = stock_result.get("success_count", 0) + etf_result.get("success_count", 0)
+        failed_count = stock_result.get("failed_count", stock_result.get("error_count", 0)) + etf_result.get("failed_count", 0)
 
         logger.info(f"✅ 自选股实时行情同步完成: 成功 {success_count}/{len(symbols)} 只")
 
@@ -287,6 +360,8 @@ async def sync_favorites_realtime(
             "success_count": success_count,
             "failed_count": failed_count,
             "symbols": symbols,
+            "etf_symbols": etf_symbols,
+            "stock_symbols": stock_symbols,
             "data_source": request.data_source,
             "message": f"同步完成: 成功 {success_count} 只，失败 {failed_count} 只"
         })

@@ -34,10 +34,10 @@
                 <h4 class="section-title">📊 股票信息</h4>
                 <el-row :gutter="16">
                   <el-col :span="12">
-                    <el-form-item label="股票代码" required>
+                    <el-form-item label="股票" required>
                       <el-input
                         v-model="analysisForm.stockCode"
-                        placeholder="如：000001、AAPL、700、1810"
+                        placeholder="输入股票代码或名称，如：贵州茅台、000001、510300、AAPL、腾讯"
                         clearable
                         size="large"
                         class="stock-input"
@@ -70,7 +70,7 @@
                       >
                         <el-option label="🇨🇳 A股市场" value="A股">
                           <span>🇨🇳 A股市场</span>
-                          <span style="color: #909399; font-size: 12px; margin-left: 8px;">（6位数字）</span>
+                          <span style="color: #909399; font-size: 12px; margin-left: 8px;">（股票/ETF，6位数字）</span>
                         </el-option>
                         <el-option label="🇺🇸 美股市场" value="美股">
                           <span>🇺🇸 美股市场</span>
@@ -411,6 +411,52 @@
                     </div>
                     <DeepModelSelector v-model="modelSettings.deepAnalysisModel" :available-models="availableModels" type="deep" size="small" width="100%" />
                   </div>
+
+                  <div class="model-item">
+                    <div class="model-label">
+                      <span>正方模型</span>
+                      <el-tooltip content="用于多头研究员、激进分析师" placement="top">
+                        <el-icon class="help-icon"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </div>
+                    <el-select v-model="modelSettings.positiveSideModel" size="small" style="width: 100%" filterable clearable placeholder="默认使用快速分析模型">
+                      <el-option
+                        v-for="model in availableModels"
+                        :key="`positive-${model.provider}/${model.model_name}`"
+                        :label="model.model_display_name || model.model_name"
+                        :value="model.model_name"
+                      >
+                        <div class="model-option-content">
+                          <span class="model-option-name">{{ model.model_display_name || model.model_name }}</span>
+                          <span class="model-option-provider">{{ model.provider }}</span>
+                        </div>
+                      </el-option>
+                    </el-select>
+                    <div class="model-help">多头研究员、激进分析师</div>
+                  </div>
+
+                  <div class="model-item">
+                    <div class="model-label">
+                      <span>反方模型</span>
+                      <el-tooltip content="用于空头研究员、保守分析师" placement="top">
+                        <el-icon class="help-icon"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </div>
+                    <el-select v-model="modelSettings.negativeSideModel" size="small" style="width: 100%" filterable clearable placeholder="默认使用快速分析模型">
+                      <el-option
+                        v-for="model in availableModels"
+                        :key="`negative-${model.provider}/${model.model_name}`"
+                        :label="model.model_display_name || model.model_name"
+                        :value="model.model_name"
+                      >
+                        <div class="model-option-content">
+                          <span class="model-option-name">{{ model.model_display_name || model.model_name }}</span>
+                          <span class="model-option-provider">{{ model.provider }}</span>
+                        </div>
+                      </el-option>
+                    </el-select>
+                    <div class="model-help">空头研究员、保守分析师</div>
+                  </div>
                 </div>
 
                 <!-- 🆕 模型推荐提示 -->
@@ -497,33 +543,6 @@
               </template>
 
               <div class="results-content">
-                <!-- 风险提示 -->
-                <div class="risk-disclaimer">
-                  <el-alert
-                    type="warning"
-                    :closable="false"
-                    show-icon
-                  >
-                    <template #title>
-                      <div class="disclaimer-content">
-                        <el-icon class="disclaimer-icon"><WarningFilled /></el-icon>
-                        <div class="disclaimer-text">
-                          <p style="margin: 0 0 8px 0;"><strong>⚠️ 重要风险提示与免责声明</strong></p>
-                          <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
-                            <li><strong>工具性质：</strong>本系统为股票分析辅助工具，使用AI技术对公开市场数据进行分析，不具备证券投资咨询资质。</li>
-                            <li><strong>非投资建议：</strong>所有分析结果、评分、建议仅为技术分析参考，不构成任何买卖建议或投资决策依据。</li>
-                            <li><strong>数据局限性：</strong>分析基于历史数据和公开信息，可能存在延迟、不完整或不准确的情况，无法预测未来市场走势。</li>
-                            <li><strong>投资风险：</strong>股票投资存在市场风险、流动性风险、政策风险等多种风险，可能导致本金损失。</li>
-                            <li><strong>独立决策：</strong>投资者应基于自身风险承受能力、投资目标和财务状况独立做出投资决策。</li>
-                            <li><strong>专业咨询：</strong>重大投资决策建议咨询具有合法资质的专业投资顾问或金融机构。</li>
-                            <li><strong>责任声明：</strong>使用本工具产生的任何投资决策及其后果由投资者自行承担，本系统不承担任何责任。</li>
-                          </ul>
-                        </div>
-                      </div>
-                    </template>
-                  </el-alert>
-                </div>
-
                 <!-- 最终决策 -->
                 <div v-if="analysisResults.decision" class="decision-section">
                   <h4>🎯 分析参考</h4>
@@ -717,6 +736,7 @@ import { marked } from 'marked'
 import { recommendModels } from '@/api/modelCapabilities'
 import { validateStockCode, getStockCodeFormatHelp } from '@/utils/stockValidator'
 import { normalizeMarketForAnalysis, getMarketByStockCode } from '@/utils/market'
+import { resolveStockInput } from '@/utils/stockInputResolver'
 
 // 配置marked选项
 marked.setOptions({
@@ -783,8 +803,10 @@ const generateStepsFromBackend = (backendSteps: any[]) => {
 
 // 模型设置
 const modelSettings = ref({
-  quickAnalysisModel: 'qwen-turbo',
-  deepAnalysisModel: 'qwen-max'
+  quickAnalysisModel: 'deepseek-v4-flash',
+  deepAnalysisModel: 'deepseek-v4-pro',
+  positiveSideModel: '',
+  negativeSideModel: ''
 })
 
 // 可用的模型列表（从配置中获取）
@@ -830,12 +852,11 @@ const disabledDate = (time: Date) => {
   return time.getTime() > Date.now()
 }
 
-// 股票代码输入时的处理
+// 股票输入时的处理
 const onStockCodeInput = () => {
   // 清除错误信息
   stockCodeError.value = ''
-  // 显示格式提示
-  stockCodeHelp.value = getStockCodeFormatHelp(analysisForm.market)
+  stockCodeHelp.value = '可输入股票代码或股票名称，提交时会自动解析'
 }
 
 // 市场类型变更时的处理
@@ -849,7 +870,7 @@ const onMarketChange = () => {
   }
 }
 
-// 验证股票代码输入
+// 验证股票输入；名称输入在提交时通过搜索解析
 const validateStockCodeInput = () => {
   const code = analysisForm.stockCode.trim()
 
@@ -859,12 +880,12 @@ const validateStockCodeInput = () => {
     return
   }
 
-  // 验证股票代码格式
+  // 验证股票代码格式；如果不是代码，则按股票名称处理
   const validation = validateStockCode(code, analysisForm.market)
 
   if (!validation.valid) {
-    stockCodeError.value = validation.message || '股票代码格式不正确'
-    stockCodeHelp.value = ''
+    stockCodeError.value = ''
+    stockCodeHelp.value = '将按股票名称搜索并自动匹配代码'
   } else {
     stockCodeError.value = ''
     stockCodeHelp.value = `✓ ${validation.market}代码格式正确`
@@ -890,6 +911,21 @@ const fetchStockInfo = () => {
   // TODO: 实现股票信息获取
 }
 
+const resolveAnalysisStockInput = async () => {
+  const input = analysisForm.stockCode.trim()
+  const resolved = await resolveStockInput(input, analysisForm.market)
+  analysisForm.symbol = resolved.symbol
+  analysisForm.stockCode = resolved.symbol
+  if (resolved.market !== analysisForm.market) {
+    analysisForm.market = resolved.market
+  }
+  stockCodeError.value = ''
+  stockCodeHelp.value = resolved.name
+    ? `✓ 已匹配：${resolved.name}（${resolved.symbol}）`
+    : `✓ ${resolved.market}代码格式正确`
+  return resolved
+}
+
 // 切换分析师
 const toggleAnalyst = (analystName: string) => {
   if (analystName === '社媒分析师' && analysisForm.market === 'A股') {
@@ -908,20 +944,19 @@ const toggleAnalyst = (analystName: string) => {
 const submitAnalysis = async () => {
   const stockCode = analysisForm.stockCode.trim()
   if (!stockCode) {
-    ElMessage.warning('请输入股票代码')
+    ElMessage.warning('请输入股票代码或名称')
     return
   }
 
-  // 验证股票代码格式
-  const validation = validateStockCode(stockCode, analysisForm.market)
-  if (!validation.valid) {
-    ElMessage.error(validation.message || '股票代码格式不正确')
-    stockCodeError.value = validation.message || '股票代码格式不正确'
+  let resolvedStock
+  try {
+    resolvedStock = await resolveAnalysisStockInput()
+  } catch (error: any) {
+    const message = error?.message || '股票代码或名称解析失败'
+    ElMessage.error(message)
+    stockCodeError.value = message
     return
   }
-
-  // 使用标准化后的代码
-  analysisForm.symbol = validation.normalizedCode || stockCode.toUpperCase()
 
   if (analysisForm.selectedAnalysts.length === 0) {
     ElMessage.warning('请至少选择一个分析师')
@@ -939,6 +974,7 @@ const submitAnalysis = async () => {
     const request: SingleAnalysisRequest = {
       symbol: analysisForm.symbol,
       stock_code: analysisForm.symbol,  // 兼容字段
+      stock_name: resolvedStock?.name,
       parameters: {
         market_type: analysisForm.market,
         analysis_date: analysisDate.toISOString().split('T')[0],
@@ -948,7 +984,9 @@ const submitAnalysis = async () => {
         include_risk: analysisForm.includeRisk,
         language: analysisForm.language,
         quick_analysis_model: modelSettings.value.quickAnalysisModel,
-        deep_analysis_model: modelSettings.value.deepAnalysisModel
+        deep_analysis_model: modelSettings.value.deepAnalysisModel,
+        positive_side_model: modelSettings.value.positiveSideModel || undefined,
+        negative_side_model: modelSettings.value.negativeSideModel || undefined
       }
     }
 
@@ -1892,6 +1930,8 @@ const initializeModelSettings = async () => {
     const defaultModels = await configApi.getDefaultModels()
     modelSettings.value.quickAnalysisModel = defaultModels.quick_analysis_model
     modelSettings.value.deepAnalysisModel = defaultModels.deep_analysis_model
+    modelSettings.value.positiveSideModel = ''
+    modelSettings.value.negativeSideModel = ''
 
     // 获取所有可用的模型列表
     const llmConfigs = await configApi.getLLMConfigs()
@@ -1902,6 +1942,8 @@ const initializeModelSettings = async () => {
     console.log('✅ 加载模型配置成功:', {
       quick: modelSettings.value.quickAnalysisModel,
       deep: modelSettings.value.deepAnalysisModel,
+      positive: modelSettings.value.positiveSideModel || modelSettings.value.quickAnalysisModel,
+      negative: modelSettings.value.negativeSideModel || modelSettings.value.quickAnalysisModel,
       available: availableModels.value.length
     })
     console.log('🔍 可用模型详细信息:', availableModels.value.map(m => ({
@@ -1911,8 +1953,10 @@ const initializeModelSettings = async () => {
     })))
   } catch (error) {
     console.error('加载默认模型配置失败:', error)
-    modelSettings.value.quickAnalysisModel = 'qwen-turbo'
-    modelSettings.value.deepAnalysisModel = 'qwen-max'
+    modelSettings.value.quickAnalysisModel = 'deepseek-v4-flash'
+    modelSettings.value.deepAnalysisModel = 'deepseek-v4-pro'
+    modelSettings.value.positiveSideModel = ''
+    modelSettings.value.negativeSideModel = ''
   }
 }
 
@@ -2166,6 +2210,8 @@ const applyRecommendedModels = () => {
   if (modelRecommendation.value?.quickModel && modelRecommendation.value?.deepModel) {
     modelSettings.value.quickAnalysisModel = modelRecommendation.value.quickModel
     modelSettings.value.deepAnalysisModel = modelRecommendation.value.deepModel
+    modelSettings.value.positiveSideModel = ''
+    modelSettings.value.negativeSideModel = ''
 
     // 清除推荐提示
     modelRecommendation.value = null
@@ -2542,6 +2588,34 @@ onMounted(async () => {
                 .help-icon {
                   color: #9ca3af;
                   cursor: help;
+                }
+              }
+
+              .model-help {
+                margin-top: 6px;
+                font-size: 12px;
+                color: #6b7280;
+                line-height: 1.4;
+              }
+
+              .model-option-content {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+
+                .model-option-name {
+                  flex: 1;
+                  min-width: 0;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                  white-space: nowrap;
+                }
+
+                .model-option-provider {
+                  flex-shrink: 0;
+                  font-size: 12px;
+                  color: #909399;
                 }
               }
             }
@@ -3040,43 +3114,6 @@ onMounted(async () => {
 .risk-disclaimer :deep(.el-alert__icon) {
   font-size: 24px;
   color: #ff6b00;
-}
-
-.disclaimer-content {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 15px;
-  line-height: 1.6;
-}
-
-.disclaimer-icon {
-  font-size: 24px;
-  color: #ff6b00;
-  flex-shrink: 0;
-  animation: pulse 2s ease-in-out infinite;
-}
-
-.disclaimer-text {
-  color: #856404;
-  flex: 1;
-}
-
-.disclaimer-text strong {
-  color: #d63031;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-@keyframes pulse {
-  0%, 100% {
-    transform: scale(1);
-    opacity: 1;
-  }
-  50% {
-    transform: scale(1.1);
-    opacity: 0.8;
-  }
 }
 
 @keyframes fadeInDown {

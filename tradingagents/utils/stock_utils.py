@@ -15,6 +15,7 @@ logger = get_logger("default")
 class StockMarket(Enum):
     """股票市场枚举"""
     CHINA_A = "china_a"      # 中国A股
+    CHINA_ETF = "china_etf"  # 中国A股ETF
     HONG_KONG = "hong_kong"  # 港股
     US = "us"                # 美股
     UNKNOWN = "unknown"      # 未知
@@ -38,6 +39,10 @@ class StockUtils:
             return StockMarket.UNKNOWN
 
         ticker = str(ticker).strip().upper()
+
+        # A股ETF：沪深交易所常见ETF基金代码
+        if StockUtils.is_china_etf_code(ticker):
+            return StockMarket.CHINA_ETF
 
         # 中国A股：6位数字
         if re.match(r'^\d{6}$', ticker):
@@ -64,7 +69,44 @@ class StockUtils:
         Returns:
             bool: 是否为中国A股
         """
-        return StockUtils.identify_stock_market(ticker) == StockMarket.CHINA_A
+        return StockUtils.identify_stock_market(ticker) in {
+            StockMarket.CHINA_A,
+            StockMarket.CHINA_ETF,
+        }
+
+    @staticmethod
+    def is_china_etf_code(ticker: str) -> bool:
+        """
+        判断是否为常见A股ETF代码。
+
+        覆盖沪市 51/56/58 开头与深市 159 开头的场内 ETF。
+        """
+        if not ticker:
+            return False
+
+        ticker = str(ticker).strip().upper()
+        if not re.match(r'^\d{6}$', ticker):
+            return False
+
+        return (
+            ticker.startswith("159")
+            or ticker.startswith("51")
+            or ticker.startswith("56")
+            or ticker.startswith("58")
+        )
+
+    @staticmethod
+    def is_china_etf(ticker: str) -> bool:
+        """
+        判断是否为中国A股ETF
+
+        Args:
+            ticker: 股票/基金代码
+
+        Returns:
+            bool: 是否为A股ETF
+        """
+        return StockUtils.identify_stock_market(ticker) == StockMarket.CHINA_ETF
     
     @staticmethod
     def is_hk_stock(ticker: str) -> bool:
@@ -105,7 +147,7 @@ class StockUtils:
         """
         market = StockUtils.identify_stock_market(ticker)
         
-        if market == StockMarket.CHINA_A:
+        if market in {StockMarket.CHINA_A, StockMarket.CHINA_ETF}:
             return "人民币", "¥"
         elif market == StockMarket.HONG_KONG:
             return "港币", "HK$"
@@ -129,6 +171,8 @@ class StockUtils:
         
         if market == StockMarket.CHINA_A:
             return "china_unified"  # 使用统一的中国股票数据源
+        elif market == StockMarket.CHINA_ETF:
+            return "akshare_etf"  # A股ETF使用AKShare基金接口
         elif market == StockMarket.HONG_KONG:
             return "yahoo_finance"  # 港股使用Yahoo Finance
         elif market == StockMarket.US:
@@ -179,6 +223,7 @@ class StockUtils:
         
         market_names = {
             StockMarket.CHINA_A: "中国A股",
+            StockMarket.CHINA_ETF: "A股ETF",
             StockMarket.HONG_KONG: "港股",
             StockMarket.US: "美股",
             StockMarket.UNKNOWN: "未知市场"
@@ -191,7 +236,8 @@ class StockUtils:
             "currency_name": currency_name,
             "currency_symbol": currency_symbol,
             "data_source": data_source,
-            "is_china": market == StockMarket.CHINA_A,
+            "is_china": market in {StockMarket.CHINA_A, StockMarket.CHINA_ETF},
+            "is_china_etf": market == StockMarket.CHINA_ETF,
             "is_hk": market == StockMarket.HONG_KONG,
             "is_us": market == StockMarket.US
         }
@@ -201,6 +247,11 @@ class StockUtils:
 def is_china_stock(ticker: str) -> bool:
     """判断是否为中国A股（向后兼容）"""
     return StockUtils.is_china_stock(ticker)
+
+
+def is_china_etf(ticker: str) -> bool:
+    """判断是否为中国A股ETF"""
+    return StockUtils.is_china_etf(ticker)
 
 
 def is_hk_stock(ticker: str) -> bool:

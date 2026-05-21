@@ -23,6 +23,7 @@ export interface AnalysisRequest {
 export interface SingleAnalysisRequest {
   symbol?: string  // 主字段：6位股票代码
   stock_code?: string  // 兼容字段（已废弃）
+  stock_name?: string
   parameters?: {
     market_type?: string
     analysis_date?: string
@@ -34,6 +35,12 @@ export interface SingleAnalysisRequest {
     language?: string
     quick_analysis_model?: string
     deep_analysis_model?: string
+    positive_side_model?: string
+    negative_side_model?: string
+    bull_researcher_model?: string
+    bear_researcher_model?: string
+    risky_analyst_model?: string
+    safe_analyst_model?: string
   }
 }
 
@@ -462,7 +469,7 @@ export const getAllTasks = async (params: {
 export const getStockExamples = (market: string): string[] => {
   const examples: Record<string, string[]> = {
     '美股': ['AAPL', 'TSLA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'NFLX'],
-    'A股': ['000001', '600519', '000002', '600036', '000858', '002415', '300059', '688981'],
+    'A股': ['000001', '600519', '510300', '159915', '000002', '600036', '000858', '300059', '688981'],
     '港股': ['0700.HK', '9988.HK', '3690.HK', '0941.HK', '1810.HK', '2318.HK', '1299.HK']
   }
   return examples[market] ?? []
@@ -471,12 +478,9 @@ export const getStockExamples = (market: string): string[] => {
 export const getStockPlaceholder = (market: string): string => {
   const placeholders: Record<string, string> = {
     '美股': '输入美股代码，如 AAPL, TSLA, MSFT',
-    'A股': '输入A股代码，如 000001, 600519',
+    'A股': '输入A股股票/ETF代码，如 000001, 600519, 510300',
     '港股': '输入港股代码，如 0700.HK, 9988.HK'
   }
   return placeholders[market] ?? '输入股票代码'
 }
-
-
-
 

@@ -852,7 +852,8 @@ class OptimizedChinaDataProvider:
             if db_manager.is_mongodb_available():
                 try:
                     db_client = db_manager.get_mongodb_client()
-                    db = db_client['tradingagents']
+                    db_name = db_manager.mongodb_config.get("database", "tradingagents")
+                    db = db_client[db_name]
 
                     # 标准化股票代码为6位
                     code6 = symbol.replace('.SH', '').replace('.SZ', '').zfill(6)
@@ -890,7 +891,12 @@ class OptimizedChinaDataProvider:
                     else:
                         logger.warning(f"⚠️ MongoDB 财务数据解析失败")
                 else:
-                    logger.info(f"🔄 MongoDB 未找到{symbol}财务数据，尝试从 AKShare API 获取")
+                    logger.info(f"🔄 MongoDB 未找到{symbol}财务数据，尝试从 stock_basic_info 获取估值数据")
+                    basic_metrics = self._get_stock_basic_valuation_metrics(symbol)
+                    if basic_metrics:
+                        logger.info(f"✅ stock_basic_info 估值数据解析成功，返回指标")
+                        return basic_metrics
+                    logger.info(f"🔄 stock_basic_info 未找到可用估值数据，尝试从 AKShare API 获取")
             else:
                 logger.info(f"🔄 数据库缓存未启用，直接从AKShare API获取{symbol}财务数据")
 
@@ -957,6 +963,89 @@ class OptimizedChinaDataProvider:
             logger.debug(f"获取{symbol}真实财务数据失败: {e}")
 
         return None
+
+    def _get_stock_basic_valuation_metrics(self, symbol: str) -> dict:
+        """Use stock_basic_info valuation fields when full financial statements are unavailable."""
+        try:
+            from tradingagents.config.database_manager import get_database_manager
+
+            db_manager = get_database_manager()
+            if not db_manager.is_mongodb_available():
+                return {}
+
+            client = db_manager.get_mongodb_client()
+            if not client:
+                return {}
+
+            db_name = db_manager.mongodb_config.get("database", "tradingagents")
+            db = client[db_name]
+            code6 = str(symbol).replace(".SH", "").replace(".SZ", "").zfill(6)
+
+            doc = (
+                db.stock_basic_info.find_one({"code": code6, "source": "tushare"}, {"_id": 0})
+                or db.stock_basic_info.find_one({"code": code6}, {"_id": 0})
+            )
+            if not doc:
+                return {}
+
+            def fmt_multiple(value, digits=1):
+                try:
+                    if value is None or str(value) in {"nan", "--"}:
+                        return "N/A"
+                    value_float = float(value)
+                    if value_float <= 0:
+                        return "N/A"
+                    return f"{value_float:.{digits}f}倍"
+                except (TypeError, ValueError):
+                    return "N/A"
+
+            def fmt_percent(value):
+                try:
+                    if value is None or str(value) in {"nan", "--"}:
+                        return "N/A"
+                    return f"{float(value):.1f}%"
+                except (TypeError, ValueError):
+                    return "N/A"
+
+            def fmt_market_cap(value):
+                try:
+                    if value is None or str(value) in {"nan", "--"}:
+                        return "N/A"
+                    value_float = float(value)
+                    if value_float <= 0:
+                        return "N/A"
+                    return f"{value_float:.2f}亿元"
+                except (TypeError, ValueError):
+                    return "N/A"
+
+            metrics = {
+                "total_mv": fmt_market_cap(doc.get("total_mv")),
+                "pe": fmt_multiple(doc.get("pe"), 1),
+                "pe_ttm": fmt_multiple(doc.get("pe_ttm"), 1),
+                "pb": fmt_multiple(doc.get("pb") or doc.get("pb_mrq"), 2),
+                "ps": fmt_multiple(doc.get("ps") or doc.get("ps_ttm"), 2),
+                "roe": fmt_percent(doc.get("roe")),
+                "roa": "N/A",
+                "gross_margin": "N/A",
+                "net_margin": "N/A",
+                "debt_ratio": "N/A",
+                "dividend_yield": "N/A",
+                "current_ratio": "N/A",
+                "quick_ratio": "N/A",
+                "cash_ratio": "N/A",
+                "fundamental_score": 6.8,
+                "valuation_score": 6.5,
+                "growth_score": 6.5,
+                "risk_level": "中等",
+                "data_source": f"stock_basic_info/{doc.get('source', 'unknown')}",
+            }
+
+            if any(metrics.get(field) != "N/A" for field in ("pe", "pe_ttm", "pb", "total_mv")):
+                return metrics
+            return {}
+        except Exception as e:
+            logger.warning(f"⚠️ stock_basic_info 估值数据读取失败: {e}")
+            return {}
 
     def _parse_mongodb_financial_data(self, financial_data: dict, price_value: float) -> dict:
         """解析 MongoDB 标准化的财务数据为指标"""

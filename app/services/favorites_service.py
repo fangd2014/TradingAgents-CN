@@ -8,7 +8,26 @@ from bson import ObjectId
 
 from app.core.database import get_mongo_db
 from app.models.user import FavoriteStock
-from app.services.quotes_service import get_quotes_service
+
+
+def _is_china_etf_code(stock_code: str) -> bool:
+    try:
+        from tradingagents.utils.stock_utils import StockUtils
+        return StockUtils.is_china_etf(stock_code)
+    except Exception:
+        code = str(stock_code or "").strip()
+        return len(code) == 6 and (
+            code.startswith("159")
+            or code.startswith("51")
+            or code.startswith("56")
+            or code.startswith("58")
+        )
+
+
+def _normalize_market(stock_code: str, market: str = "A股") -> str:
+    if _is_china_etf_code(stock_code):
+        return "A股ETF"
+    return market or "A股"
 
 
 class FavoritesService:
@@ -42,7 +61,7 @@ class FavoritesService:
         return {
             "stock_code": favorite.get("stock_code"),
             "stock_name": favorite.get("stock_name"),
-            "market": favorite.get("market", "A股"),
+            "market": _normalize_market(favorite.get("stock_code"), favorite.get("market", "A股")),
             "added_at": added_at,
             "tags": favorite.get("tags", []),
             "notes": favorite.get("notes", ""),
@@ -110,6 +129,9 @@ class FavoritesService:
                         it["board"] = basic.get("market", "-")
                         # sse 字段表示交易所（上海证券交易所、深圳证券交易所等）
                         it["exchange"] = basic.get("sse", "-")
+                    elif _is_china_etf_code(code):
+                        it["board"] = "ETF"
+                        it["exchange"] = "上海证券交易所" if str(code).startswith(("51", "56", "58")) else "深圳证券交易所"
                     else:
                         it["board"] = "-"
                         it["exchange"] = "-"
@@ -119,11 +141,15 @@ class FavoritesService:
                     it["board"] = "-"
                     it["exchange"] = "-"
 
-        # 批量获取行情（优先使用入库的 market_quotes，30秒更新）
+        # 批量获取行情：列表接口只读入库缓存，避免同步拉取 AKShare 全市场快照导致页面阻塞。
+        # 实时刷新由 /api/favorites/sync-realtime 显式触发。
         if codes:
             try:
                 coll = db["market_quotes"]
-                cursor = coll.find({"code": {"$in": codes}}, {"code": 1, "close": 1, "pct_chg": 1, "amount": 1})
+                cursor = coll.find(
+                    {"code": {"$in": codes}},
+                    {"code": 1, "close": 1, "pct_chg": 1, "amount": 1, "volume": 1, "_id": 0}
+                )
                 docs = await cursor.to_list(length=None)
                 quotes_map = {str(d.get("code")).zfill(6): d for d in (docs or [])}
                 for it in items:
@@ -132,19 +158,7 @@ class FavoritesService:
                     if q:
                         it["current_price"] = q.get("close")
                         it["change_percent"] = q.get("pct_chg")
-                # 兜底：对未命中的代码使用在线源补齐（可选）
-                missing = [c for c in codes if c not in quotes_map]
-                if missing:
-                    try:
-                        quotes_online = await get_quotes_service().get_quotes(missing)
-                        for it in items:
-                            code = it.get("stock_code")
-                            if it.get("current_price") is None:
-                                q2 = quotes_online.get(code, {}) if quotes_online else {}
-                                it["current_price"] = q2.get("close")
-                                it["change_percent"] = q2.get("pct_chg")
-                    except Exception:
-                        pass
+                        it["volume"] = q.get("volume")
             except Exception:
                 # 查询失败时保持占位 None，避免影响基础功能
                 pass
@@ -171,6 +185,8 @@ class FavoritesService:
 
             db = await self._get_db()
             logger.info(f"🔧 [add_favorite] 数据库连接获取成功")
+            stock_code = str(stock_code).strip()
+            market = _normalize_market(stock_code, market)
 
             favorite_stock = {
                 "stock_code": stock_code,

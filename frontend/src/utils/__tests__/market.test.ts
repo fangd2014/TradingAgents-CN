@@ -9,6 +9,13 @@ describe('getMarketByStockCode', () => {
       expect(getMarketByStockCode('300750')).toBe('A股')
       expect(getMarketByStockCode('688981')).toBe('A股')
     })
+
+    it('应该识别常见A股ETF代码为A股', () => {
+      expect(getMarketByStockCode('510300')).toBe('A股')
+      expect(getMarketByStockCode('159915')).toBe('A股')
+      expect(getMarketByStockCode('588000')).toBe('A股')
+      expect(getMarketByStockCode('560000')).toBe('A股')
+    })
   })
 
   describe('港股识别', () => {
@@ -71,4 +78,3 @@ describe('getMarketByStockCode', () => {
     })
   })
 })
-

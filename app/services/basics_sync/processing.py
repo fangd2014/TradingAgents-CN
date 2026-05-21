@@ -10,6 +10,7 @@ def add_financial_metrics(doc: Dict, daily_metrics: Dict) -> None:
     将财务与交易指标写入 doc（就地修改）。
     - 市值：total_mv/circ_mv（从万元转换为亿元）
     - 估值：pe/pb/pe_ttm/pb_mrq/ps/ps_ttm（过滤 NaN/None）
+    - 财务指标：roe/grossprofit_margin/netprofit_margin/debt_to_assets/or_yoy/netprofit_yoy 等（过滤 NaN/None）
     - 交易：turnover_rate/volume_ratio（过滤 NaN/None）
     - 股本：total_share/float_share（万股，过滤 NaN/None）
     """
@@ -22,6 +23,31 @@ def add_financial_metrics(doc: Dict, daily_metrics: Dict) -> None:
     # 估值指标（🔥 新增 ps 和 ps_ttm）
     for field in ["pe", "pb", "pe_ttm", "pb_mrq", "ps", "ps_ttm"]:
         if field in daily_metrics and daily_metrics[field] is not None:
+            try:
+                value = float(daily_metrics[field])
+                if not (value != value):  # 过滤 NaN
+                    doc[field] = value
+            except (ValueError, TypeError):
+                pass
+
+    # 财务指标快照（来自 Tushare fina_indicator，百分比字段保持原单位）
+    for field in [
+        "financial_indicator_period",
+        "roe",
+        "roe_waa",
+        "grossprofit_margin",
+        "netprofit_margin",
+        "debt_to_assets",
+        "or_yoy",
+        "revenue_yoy",
+        "netprofit_yoy",
+        "profit_dedt_yoy",
+        "dt_netprofit_yoy",
+    ]:
+        if field in daily_metrics and daily_metrics[field] is not None:
+            if field == "financial_indicator_period":
+                doc[field] = str(daily_metrics[field])
+                continue
             try:
                 value = float(daily_metrics[field])
                 if not (value != value):  # 过滤 NaN
@@ -48,4 +74,3 @@ def add_financial_metrics(doc: Dict, daily_metrics: Dict) -> None:
                     doc[field] = value
             except (ValueError, TypeError):
                 pass
-

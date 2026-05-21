@@ -232,7 +232,7 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item label="代码">
-          <el-input v-model="order.code" placeholder="A股: 600519 | 港股: 0700 | 美股: AAPL" @input="detectMarket" />
+          <el-input v-model="order.code" placeholder="A股: 贵州茅台 / 600519 | 港股: 腾讯控股 / 0700 | 美股: Apple / AAPL" @input="detectMarket" />
         </el-form-item>
         <el-form-item label="市场" v-if="detectedMarket">
           <el-tag v-if="detectedMarket === 'CN'" type="success">🇨🇳 A股市场 (CNY)</el-tag>
@@ -265,6 +265,7 @@ import { paperApi } from '@/api/paper'
 import { analysisApi } from '@/api/analysis'
 import { stocksApi } from '@/api/stocks'
 import { formatDateTime } from '@/utils/datetime'
+import { resolveStockInput, type AnalysisMarket } from '@/utils/stockInputResolver'
 
 // 路由与初始化
 const route = useRoute()
@@ -352,6 +353,12 @@ function detectMarket() {
   detectedMarket.value = 'CN'
 }
 
+function detectedMarketToAnalysisMarket(): AnalysisMarket {
+  if (detectedMarket.value === 'HK') return '港股'
+  if (detectedMarket.value === 'US') return '美股'
+  return 'A股'
+}
+
 async function fetchAccount() {
   try {
     loading.value.account = true
@@ -433,7 +440,23 @@ function openOrderDialog() {
 
 async function submitOrder() {
   try {
-    const payload: any = { side: order.value.side as 'buy' | 'sell', code: order.value.code, quantity: Number(order.value.qty) }
+    const inputCode = order.value.code.trim()
+    if (!inputCode) {
+      ElMessage.warning('请输入股票代码或名称')
+      return
+    }
+
+    detectMarket()
+    const resolved = await resolveStockInput(inputCode, detectedMarketToAnalysisMarket())
+    order.value.code = resolved.symbol
+    detectedMarket.value = resolved.market === '港股' ? 'HK' : resolved.market === '美股' ? 'US' : 'CN'
+
+    const payload: any = {
+      side: order.value.side as 'buy' | 'sell',
+      code: resolved.symbol,
+      market: detectedMarket.value,
+      quantity: Number(order.value.qty)
+    }
     if ((order.value as any).analysis_id) payload.analysis_id = (order.value as any).analysis_id
     const res = await paperApi.placeOrder(payload)
     if (res.success) {
