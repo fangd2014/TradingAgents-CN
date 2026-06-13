@@ -1530,7 +1530,12 @@ class DataSourceManager:
             for col in volume_columns:
                 if col in data.columns:
                     logger.info(f"✅ 找到成交量列: {col}")
-                    return data[col].sum()
+                    volume_data = data.loc[:, col]
+                    numeric_volume = volume_data.apply(pd.to_numeric, errors="coerce") if isinstance(volume_data, pd.DataFrame) else pd.to_numeric(volume_data, errors="coerce")
+                    volume_sum = numeric_volume.sum()
+                    if isinstance(volume_sum, pd.Series):
+                        volume_sum = volume_sum.sum()
+                    return float(volume_sum or 0)
 
             # 如果都没找到，记录警告并返回0
             logger.warning(f"⚠️ 未找到成交量列，可用列: {list(data.columns)}")

@@ -105,6 +105,41 @@ class TushareProvider(BaseStockDataProvider):
 
         return None
 
+    def _test_token_sync(self, token: str, timeout: int) -> bool:
+        """Validate a Tushare token through the raw Pro HTTP endpoint.
+
+        The tushare SDK can return an empty DataFrame when the official API
+        response contains `items` but reports `count: 0`, so token validation
+        uses the raw endpoint and checks the business response directly.
+        """
+        try:
+            import requests
+
+            api_url = configure_tushare_api_endpoint()
+            payload = {
+                "api_name": "stock_basic",
+                "token": token,
+                "params": {"ts_code": "001309.SZ"},
+                "fields": "ts_code,symbol,name",
+            }
+            resp = requests.post(api_url, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            body = resp.json()
+            items = (body.get("data") or {}).get("items") or []
+            if body.get("code") == 0 and items:
+                self.logger.info("✅ Tushare Token HTTP验证成功，返回数据: %s 条", len(items))
+                return True
+            self.logger.warning(
+                "⚠️ Tushare Token HTTP验证失败: code=%s msg=%s items=%s",
+                body.get("code"),
+                body.get("msg"),
+                len(items),
+            )
+            return False
+        except Exception as exc:
+            self.logger.warning("⚠️ Tushare Token HTTP验证异常: %s", exc)
+            return False
+
     def connect_sync(self) -> bool:
         """同步连接到Tushare"""
         if not TUSHARE_AVAILABLE:
@@ -138,14 +173,13 @@ class TushareProvider(BaseStockDataProvider):
 
                     # 测试连接 - 直接调用同步方法（不使用 asyncio.run）
                     try:
-                        self.logger.info("🔄 [步骤3.1] 调用 stock_basic API 测试连接...")
-                        test_data = self.api.stock_basic(list_status='L', limit=1)
-                        self.logger.info(f"✅ [步骤3.1] API 调用成功，返回数据: {len(test_data) if test_data is not None else 0} 条")
+                        self.logger.info("🔄 [步骤3.1] 调用 Tushare HTTP API 测试连接...")
+                        token_valid = self._test_token_sync(db_token, test_timeout)
                     except Exception as e:
                         self.logger.warning(f"⚠️ [步骤3.1] 数据库 Token 测试失败: {e}，尝试降级到 .env 配置...")
-                        test_data = None
+                        token_valid = False
 
-                    if test_data is not None and not test_data.empty:
+                    if token_valid:
                         self.connected = True
                         self.token_source = 'database'
                         self.logger.info(f"✅ [步骤3.2] Tushare连接成功 (Token来源: 数据库)")
@@ -164,14 +198,13 @@ class TushareProvider(BaseStockDataProvider):
 
                     # 测试连接 - 直接调用同步方法（不使用 asyncio.run）
                     try:
-                        self.logger.info("🔄 [步骤4.1] 调用 stock_basic API 测试连接...")
-                        test_data = self.api.stock_basic(list_status='L', limit=1)
-                        self.logger.info(f"✅ [步骤4.1] API 调用成功，返回数据: {len(test_data) if test_data is not None else 0} 条")
+                        self.logger.info("🔄 [步骤4.1] 调用 Tushare HTTP API 测试连接...")
+                        token_valid = self._test_token_sync(env_token, test_timeout)
                     except Exception as e:
                         self.logger.error(f"❌ [步骤4.1] .env Token 测试失败: {e}")
                         return False
 
-                    if test_data is not None and not test_data.empty:
+                    if token_valid:
                         self.connected = True
                         self.token_source = 'env'
                         self.logger.info(f"✅ [步骤4.2] Tushare连接成功 (Token来源: .env 环境变量)")
