@@ -67,6 +67,8 @@ async def _sync_external_realtime_quotes(symbols: List[str]) -> dict:
             "volume": quote.get("volume"),
             "source": quote.get("source") or "external_quotes",
             "data_source": quote.get("source") or "external_quotes",
+            "datetime": quote.get("datetime"),
+            "trade_date": quote.get("trade_date"),
             "updated_at": datetime.utcnow(),
         }
         for field in ("pe_ttm", "pb", "total_mv", "float_mv", "turnover_rate", "limit_up", "limit_down"):

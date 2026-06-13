@@ -42,6 +42,13 @@ def _market_prefix(code: str) -> str:
     return "sz"
 
 
+def _quote_datetime(fields: List[str]) -> str:
+    if len(fields) <= 30:
+        return ""
+    raw = str(fields[30] or "").strip()
+    return raw if len(raw) >= 8 and raw[:8].isdigit() else ""
+
+
 class TencentFinanceClient:
     """Small client for Tencent's qt.gtimg.cn quote endpoint."""
 
@@ -73,6 +80,8 @@ class TencentFinanceClient:
         if not code:
             return None
 
+        quote_datetime = _quote_datetime(fields)
+
         return {
             "code": code,
             "name": fields[1],
@@ -91,6 +100,8 @@ class TencentFinanceClient:
             "float_mv": _safe_float(fields[46]) if len(fields) > 46 else None,
             "limit_up": _safe_float(fields[49]) if len(fields) > 49 else None,
             "limit_down": _safe_float(fields[50]) if len(fields) > 50 else None,
+            "datetime": quote_datetime or None,
+            "trade_date": quote_datetime[:8] if quote_datetime else None,
             "source": "tencent_finance",
         }
 

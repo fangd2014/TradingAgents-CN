@@ -26,6 +26,8 @@ LATEST_QUOTE_FIELDS = [
     "turnover_rate",
     "limit_up",
     "limit_down",
+    "datetime",
+    "trade_date",
 ]
 
 
@@ -260,6 +262,8 @@ class FavoritesService:
                 "pre_close": quote.get("pre_close"),
                 "source": quote.get("source") or "external_quotes",
                 "data_source": quote.get("source") or "external_quotes",
+                "datetime": quote.get("datetime"),
+                "trade_date": quote.get("trade_date"),
                 "updated_at": now,
             }
             for field in LATEST_QUOTE_FIELDS:

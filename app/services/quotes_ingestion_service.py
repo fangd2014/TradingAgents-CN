@@ -377,6 +377,7 @@ class QuotesIngestionService:
             if code6 in ["300750", "000001", "600000"]:  # 只记录几个示例股票
                 logger.info(f"📊 [写入market_quotes] {code6} - volume={volume}, amount={q.get('amount')}, source={source}")
 
+            quote_trade_date = q.get("trade_date") or trade_date
             ops.append(
                 UpdateOne(
                     {"code": code6},
@@ -391,7 +392,8 @@ class QuotesIngestionService:
                         "high": q.get("high"),
                         "low": q.get("low"),
                         "pre_close": q.get("pre_close"),
-                        "trade_date": trade_date,
+                        "datetime": q.get("datetime"),
+                        "trade_date": quote_trade_date,
                         "updated_at": updated_at,
                     }},
                     upsert=True,

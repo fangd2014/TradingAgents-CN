@@ -66,6 +66,8 @@ def test_tencent_quote_parser_standardizes_realtime_snapshot():
         "float_mv": 1100.0,
         "limit_up": 12.5,
         "limit_down": 12.0,
+        "datetime": "20260612150000",
+        "trade_date": "20260612",
         "source": "tencent_finance",
     }
 
