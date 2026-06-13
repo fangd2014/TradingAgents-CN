@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 VALID_SCOPES = {"top10", "float_top10"}
+MIN_SHAREHOLDER_ROWS_PER_PERIOD = 5
 
 
 def normalize_code6(code: str) -> str:
@@ -61,6 +62,105 @@ def _now_iso() -> str:
 def _normalize_holder_name(name: Any) -> str:
     text = str(name or "").strip().lower()
     return re.sub(r"\s+", "", text)
+
+
+def _get_tushare_token(provider: Any) -> Optional[str]:
+    try:
+        return provider._get_token_from_database() or provider.config.get("token")
+    except Exception as exc:
+        logger.warning("读取 Tushare Token 失败: %s", exc)
+        return None
+
+
+def _fetch_tushare_raw_rows_sync(api_name: str, ts_code: str, token: Optional[str]) -> List[Dict[str, Any]]:
+    """Fetch raw Tushare shareholder rows through HTTP.
+
+    The official SDK can return an empty DataFrame for holder APIs even when
+    the HTTP response contains rows, so shareholder refresh keeps this fallback.
+    """
+    if not token:
+        return []
+
+    try:
+        import requests
+        from tradingagents.config.tushare_endpoint import configure_tushare_api_endpoint
+    except Exception as exc:
+        logger.warning("Tushare 原始股东接口依赖不可用: %s", exc)
+        return []
+
+    fields = "ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio"
+    try:
+        payload = {
+            "api_name": api_name,
+            "token": token,
+            "params": {"ts_code": ts_code},
+            "fields": fields,
+        }
+        resp = requests.post(configure_tushare_api_endpoint(), json=payload, timeout=20)
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("code") != 0:
+            logger.warning("Tushare %s 原始接口失败 %s: %s", api_name, ts_code, body.get("msg"))
+            return []
+
+        data = body.get("data") or {}
+        columns = data.get("fields") or fields.split(",")
+        return [dict(zip(columns, item)) for item in data.get("items") or []]
+    except Exception as exc:
+        logger.warning("Tushare %s 原始接口获取 %s 失败: %s", api_name, ts_code, exc)
+        return []
+
+
+def fetch_tushare_shareholder_rows_sync(code: str, scope: str) -> List[Dict[str, Any]]:
+    """Fetch and normalize shareholder rows from Tushare without touching DB."""
+    if scope not in VALID_SCOPES:
+        return []
+
+    try:
+        from tradingagents.dataflows.providers.china.tushare import get_tushare_provider
+    except Exception as exc:
+        logger.warning("Tushare 股东数据提供器不可用: %s", exc)
+        return []
+
+    provider = get_tushare_provider()
+    if not getattr(provider, "is_available", lambda: False)():
+        try:
+            provider.connect_sync()
+        except Exception as exc:
+            logger.warning("Tushare 股东数据连接失败: %s", exc)
+
+    code6 = normalize_code6(code)
+    ts_code = to_ts_code(code6)
+    method_name = "top10_holders" if scope == "top10" else "top10_floatholders"
+    token = _get_tushare_token(provider)
+    raw_rows: List[Dict[str, Any]] = []
+
+    api = getattr(provider, "api", None)
+    if api is not None:
+        try:
+            df = getattr(api, method_name)(ts_code=ts_code)
+            if df is not None and not getattr(df, "empty", True):
+                raw_rows = df.to_dict("records")
+        except Exception as exc:
+            logger.warning("Tushare %s 获取 %s 失败: %s", method_name, code6, exc)
+
+    if not raw_rows:
+        raw_rows = _fetch_tushare_raw_rows_sync(method_name, ts_code, token)
+
+    rows: List[Dict[str, Any]] = []
+    period_ranks: Dict[str, int] = {}
+    for idx, raw in enumerate(raw_rows, start=1):
+        raw_row = dict(raw)
+        period = str(raw_row.get("end_date") or raw_row.get("report_date") or "")
+        rank = _safe_int(raw_row.get("rank"))
+        if rank is None:
+            period_ranks[period] = period_ranks.get(period, 0) + 1
+            rank = period_ranks[period]
+            raw_row["rank"] = rank
+        row = StockShareholderService.normalize_tushare_row(raw_row, scope=scope, rank=idx)
+        if row["holder_name"] and row["end_date"]:
+            rows.append(row)
+    return rows
 
 
 class StockShareholderService:
@@ -144,10 +244,17 @@ class StockShareholderService:
         cursor = collection.find({"code": code6, "holder_scope": scope}, {"_id": 0}).sort("end_date", -1)
         docs = await cursor.to_list(length=None)
         docs = docs if isinstance(docs, list) else []
+        period_counts: Dict[str, int] = {}
+        for doc in docs:
+            period = str(doc.get("end_date") or "")
+            if period:
+                period_counts[period] = period_counts.get(period, 0) + 1
         wanted_periods = []
         seen = set()
         for doc in docs:
             period = str(doc.get("end_date") or "")
+            if period_counts.get(period, 0) < MIN_SHAREHOLDER_ROWS_PER_PERIOD:
+                continue
             if period and period not in seen:
                 seen.add(period)
                 wanted_periods.append(period)
@@ -177,40 +284,7 @@ class StockShareholderService:
             )
 
     async def _fetch_tushare(self, code6: str, scope: str) -> List[Dict[str, Any]]:
-        try:
-            from tradingagents.dataflows.providers.china.tushare import get_tushare_provider
-        except Exception as exc:
-            logger.warning("Tushare 股东数据提供器不可用: %s", exc)
-            return []
-
-        provider = get_tushare_provider()
-        api = getattr(provider, "api", None)
-        if api is None:
-            logger.warning("Tushare 股东数据 API 未初始化")
-            return []
-
-        ts_code = to_ts_code(code6)
-        method_name = "top10_holders" if scope == "top10" else "top10_floatholders"
-
-        def fetch():
-            method = getattr(api, method_name)
-            return method(ts_code=ts_code)
-
-        try:
-            df = await asyncio.to_thread(fetch)
-        except Exception as exc:
-            logger.warning("Tushare %s 获取 %s 失败: %s", method_name, code6, exc)
-            return []
-
-        if df is None or getattr(df, "empty", True):
-            return []
-
-        rows: List[Dict[str, Any]] = []
-        for idx, raw in enumerate(df.to_dict("records"), start=1):
-            row = self.normalize_tushare_row(raw, scope=scope, rank=idx)
-            if row["holder_name"] and row["end_date"]:
-                rows.append(row)
-        return rows
+        return await asyncio.to_thread(fetch_tushare_shareholder_rows_sync, code6, scope)
 
     async def _fetch_akshare(self, code6: str, scope: str) -> List[Dict[str, Any]]:
         try:

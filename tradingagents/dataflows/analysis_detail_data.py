@@ -9,6 +9,7 @@ formats a compact Markdown context for LLM analysis tools.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from tradingagents.utils.logging_init import get_logger
@@ -16,6 +17,7 @@ from tradingagents.utils.stock_utils import StockUtils
 from app.services.stock_detail_insight_service import calculate_magic_nine
 
 logger = get_logger("default")
+MIN_SHAREHOLDER_ROWS_PER_PERIOD = 5
 
 
 def normalize_code6(code: str) -> str:
@@ -326,10 +328,21 @@ def _calculate_shareholder_changes(latest: List[Dict[str, Any]], previous: List[
 
 def _get_shareholders(db, code6: str, scope: str, periods: int = 4) -> Dict[str, Any]:
     docs = _find_many(db["stock_shareholders"], {"code": code6, "holder_scope": scope}, {"_id": 0})
+    if not docs:
+        _refresh_shareholders(db, code6, scope)
+        docs = _find_many(db["stock_shareholders"], {"code": code6, "holder_scope": scope}, {"_id": 0})
+
     docs.sort(key=lambda item: (str(item.get("end_date") or ""), -(item.get("rank") or 999)), reverse=True)
+    period_counts: Dict[str, int] = {}
+    for doc in docs:
+        period = str(doc.get("end_date") or "")
+        if period:
+            period_counts[period] = period_counts.get(period, 0) + 1
     wanted_periods = []
     for doc in docs:
         period = str(doc.get("end_date") or "")
+        if period_counts.get(period, 0) < MIN_SHAREHOLDER_ROWS_PER_PERIOD:
+            continue
         if period and period not in wanted_periods:
             wanted_periods.append(period)
         if len(wanted_periods) >= periods:
@@ -350,6 +363,35 @@ def _get_shareholders(db, code6: str, scope: str, periods: int = 4) -> Dict[str,
         "latest": latest,
         "changes": _calculate_shareholder_changes(latest, previous),
     }
+
+
+def _refresh_shareholders(db, code6: str, scope: str) -> None:
+    try:
+        from app.services.stock_shareholder_service import fetch_tushare_shareholder_rows_sync
+
+        rows = fetch_tushare_shareholder_rows_sync(code6, scope)
+        if not rows:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        collection = db["stock_shareholders"]
+        for row in rows:
+            record = dict(row)
+            record.setdefault("created_at", now)
+            record["updated_at"] = now
+            collection.replace_one(
+                {
+                    "code": record["code"],
+                    "holder_scope": record["holder_scope"],
+                    "end_date": record["end_date"],
+                    "rank": record["rank"],
+                },
+                record,
+                upsert=True,
+            )
+        logger.info("已刷新 %s %s 股东结构数据: %s 条", code6, scope, len(rows))
+    except Exception as exc:
+        logger.warning("刷新 %s %s 股东结构数据失败: %s", code6, scope, exc)
 
 
 def _format_financial_detail(data: Dict[str, Any]) -> str:

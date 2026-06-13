@@ -24,6 +24,7 @@ LATEST_QUOTE_FIELDS = [
     "total_mv",
     "float_mv",
     "turnover_rate",
+    "amplitude",
     "limit_up",
     "limit_down",
     "datetime",
@@ -49,6 +50,19 @@ def _normalize_market(stock_code: str, market: str = "A股") -> str:
     if _is_china_etf_code(stock_code):
         return "A股ETF"
     return market or "A股"
+
+
+def calculate_amplitude(quote: Dict[str, Any]) -> Optional[float]:
+    """计算日内振幅：(最高价 - 最低价) / 昨收价 * 100。"""
+    try:
+        high = quote.get("high")
+        low = quote.get("low")
+        pre_close = quote.get("pre_close")
+        if high is None or low is None or pre_close in (None, 0):
+            return None
+        return round((float(high) - float(low)) / float(pre_close) * 100, 2)
+    except Exception:
+        return None
 
 
 class FavoritesService:
@@ -93,6 +107,7 @@ class FavoritesService:
             "total_mv": favorite.get("total_mv"),
             "float_mv": favorite.get("float_mv"),
             "turnover_rate": favorite.get("turnover_rate"),
+            "amplitude": favorite.get("amplitude"),
             "limit_up": favorite.get("limit_up"),
             "limit_down": favorite.get("limit_down"),
             "quote_source": favorite.get("quote_source"),
@@ -193,6 +208,10 @@ class FavoritesService:
                         "total_mv": 1,
                         "float_mv": 1,
                         "turnover_rate": 1,
+                        "amplitude": 1,
+                        "high": 1,
+                        "low": 1,
+                        "pre_close": 1,
                         "limit_up": 1,
                         "limit_down": 1,
                         "_id": 0,
@@ -209,6 +228,9 @@ class FavoritesService:
                         it["current_price"] = q.get("close")
                         it["change_percent"] = q.get("pct_chg")
                         it["volume"] = q.get("volume")
+                        it["amplitude"] = q.get("amplitude")
+                        if it["amplitude"] is None:
+                            it["amplitude"] = calculate_amplitude(q)
                         it["quote_source"] = q.get("source") or q.get("data_source") or it.get("quote_source")
                         for field in LATEST_QUOTE_FIELDS:
                             if q.get(field) is not None:
@@ -260,6 +282,7 @@ class FavoritesService:
                 "high": quote.get("high"),
                 "low": quote.get("low"),
                 "pre_close": quote.get("pre_close"),
+                "amplitude": calculate_amplitude(quote),
                 "source": quote.get("source") or "external_quotes",
                 "data_source": quote.get("source") or "external_quotes",
                 "datetime": quote.get("datetime"),

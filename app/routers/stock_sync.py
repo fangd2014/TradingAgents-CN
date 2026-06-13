@@ -15,6 +15,7 @@ from app.worker.tushare_sync_service import get_tushare_sync_service
 from app.worker.akshare_sync_service import get_akshare_sync_service
 from app.worker.financial_data_sync_service import get_financial_sync_service
 from app.services.a_share_preload_service import get_a_share_preload_service
+from app.services.favorites_service import calculate_amplitude
 from app.utils.timezone import to_config_tz
 import logging
 import asyncio
@@ -25,7 +26,7 @@ logger = logging.getLogger("webapi")
 router = APIRouter(prefix="/api/stock-sync", tags=["股票数据同步"])
 
 AUTO_REALTIME_SOURCES = ["external_quotes"]
-AUTO_HISTORICAL_SOURCES = ["mootdx", "tushare", "akshare"]
+AUTO_HISTORICAL_SOURCES = ["tushare", "mootdx", "akshare"]
 AUTO_FINANCIAL_SOURCES = ["mootdx", "tushare", "akshare"]
 AUTO_BASIC_SOURCES = ["mootdx_tencent", "tushare", "akshare"]
 
@@ -103,6 +104,11 @@ async def _sync_etf_latest_to_market_quotes(symbol: str) -> dict:
         "change_percent": quote.get("pct_chg"),
         "amount": quote.get("amount"),
         "volume": quote.get("volume"),
+        "open": quote.get("open"),
+        "high": quote.get("high"),
+        "low": quote.get("low"),
+        "pre_close": quote.get("pre_close"),
+        "amplitude": calculate_amplitude(quote),
         "data_source": quote.get("source") or "akshare_fund_etf_spot_em",
         "updated_at": datetime.utcnow(),
     }
@@ -216,6 +222,7 @@ async def _sync_external_quote_to_market_quotes(symbol: str) -> Dict[str, Any]:
         "high": quote.get("high"),
         "low": quote.get("low"),
         "pre_close": quote.get("pre_close"),
+        "amplitude": calculate_amplitude(quote),
         "source": quote.get("source") or "external_quotes",
         "data_source": quote.get("source") or "external_quotes",
         "updated_at": datetime.utcnow(),

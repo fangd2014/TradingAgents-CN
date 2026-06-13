@@ -52,7 +52,15 @@
         </el-col>
 
         <el-col :span="4">
-          <el-select v-model="selectedTag" placeholder="标签" clearable>
+          <el-select
+            v-model="selectedTags"
+            placeholder="标签"
+            multiple
+            clearable
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+          >
             <el-option
               v-for="tag in userTags"
               :key="tag"
@@ -119,7 +127,7 @@
         @selection-change="handleSelectionChange"
       >
         <el-table-column type="selection" width="55" />
-        <el-table-column prop="stock_code" label="股票代码" width="120">
+        <el-table-column prop="stock_code" label="股票代码" width="105" sortable>
           <template #default="{ row }">
             <el-link type="primary" @click="viewStockDetail(row)">
               {{ row.stock_code }}
@@ -127,16 +135,16 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="stock_name" label="股票名称" width="150" />
+        <el-table-column prop="stock_name" label="股票名称" width="130" sortable />
 
-        <el-table-column prop="current_price" label="当前价格" width="100">
+        <el-table-column prop="current_price" label="当前价格" width="100" sortable>
           <template #default="{ row }">
             <span v-if="row.current_price !== null && row.current_price !== undefined">¥{{ formatPrice(row.current_price) }}</span>
             <span v-else>-</span>
           </template>
         </el-table-column>
 
-        <el-table-column prop="change_percent" label="涨跌幅" width="100">
+        <el-table-column prop="change_percent" label="涨跌幅" width="100" sortable>
           <template #default="{ row }">
             <span
               v-if="row.change_percent !== null && row.change_percent !== undefined"
@@ -148,25 +156,31 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="pe_ttm" label="PE(TTM)" width="95">
+        <el-table-column prop="pe_ttm" label="PE(TTM)" width="95" sortable>
           <template #default="{ row }">
             {{ row.pe_ttm !== null && row.pe_ttm !== undefined ? formatPrice(row.pe_ttm) : '-' }}
           </template>
         </el-table-column>
 
-        <el-table-column prop="pb" label="PB" width="80">
+        <el-table-column prop="pb" label="PB" width="80" sortable>
           <template #default="{ row }">
             {{ row.pb !== null && row.pb !== undefined ? formatPrice(row.pb) : '-' }}
           </template>
         </el-table-column>
 
-        <el-table-column prop="turnover_rate" label="换手率" width="95">
+        <el-table-column prop="turnover_rate" label="换手率" width="95" sortable>
           <template #default="{ row }">
             {{ row.turnover_rate !== null && row.turnover_rate !== undefined ? formatPercent(row.turnover_rate) : '-' }}
           </template>
         </el-table-column>
 
-        <el-table-column prop="tags" label="标签" width="150">
+        <el-table-column prop="amplitude" label="振幅" width="90" sortable>
+          <template #default="{ row }">
+            {{ row.amplitude !== null && row.amplitude !== undefined ? formatPercent(row.amplitude) : '-' }}
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="tags" label="标签" width="150" sortable :sort-method="sortByTags">
           <template #default="{ row }">
             <el-tag
               v-for="tag in row.tags"
@@ -181,23 +195,23 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="market" label="市场" width="80">
+        <el-table-column prop="market" label="市场" width="80" sortable>
           <template #default="{ row }">
             {{ row.market || 'A股' }}
           </template>
         </el-table-column>
-        <el-table-column prop="board" label="板块" width="100">
+        <el-table-column prop="board" label="板块" width="100" sortable>
           <template #default="{ row }">
             {{ row.board || '-' }}
           </template>
         </el-table-column>
-        <el-table-column prop="exchange" label="交易所" width="140">
+        <el-table-column prop="exchange" label="交易所" width="140" sortable>
           <template #default="{ row }">
             {{ row.exchange || '-' }}
           </template>
         </el-table-column>
 
-        <el-table-column prop="added_at" label="添加时间" width="120">
+        <el-table-column prop="added_at" label="添加时间" width="120" sortable>
           <template #default="{ row }">
             {{ formatDate(row.added_at) }}
           </template>
@@ -453,7 +467,7 @@
         </el-form-item>
         <el-form-item label="数据源">
           <el-tag type="success">自动按优先级尝试</el-tag>
-          <span class="source-priority-text">实时 external_quotes；历史 mootdx → Tushare → AKShare；财务 mootdx → Tushare → AKShare；基础 mootdx/腾讯</span>
+          <span class="source-priority-text">实时 external_quotes；历史 Tushare → mootdx → AKShare；财务 mootdx → Tushare → AKShare；基础 mootdx/腾讯</span>
         </el-form-item>
         <el-form-item label="历史数据天数" v-if="batchSyncForm.syncTypes.includes('historical')">
           <el-input-number v-model="batchSyncForm.days" :min="1" :max="3650" />
@@ -502,7 +516,7 @@
         </el-form-item>
         <el-form-item label="数据源">
           <el-tag type="success">自动按优先级尝试</el-tag>
-          <span class="source-priority-text">实时 external_quotes；历史 mootdx → Tushare → AKShare；财务 mootdx → Tushare → AKShare；基础 mootdx/腾讯</span>
+          <span class="source-priority-text">实时 external_quotes；历史 Tushare → mootdx → AKShare；财务 mootdx → Tushare → AKShare；基础 mootdx/腾讯</span>
         </el-form-item>
         <el-form-item label="历史数据天数" v-if="singleSyncForm.syncTypes.includes('historical')">
           <el-input-number v-model="singleSyncForm.days" :min="1" :max="3650" />
@@ -563,13 +577,15 @@ const tagColorMap = ref<Record<string, string>>({})
 const getTagColor = (name: string) => tagColorMap.value[name] || ''
 
 const searchKeyword = ref('')
-const selectedTag = ref('')
+const selectedTags = ref<string[]>([])
 const selectedMarket = ref('')
 const selectedBoard = ref('')
 const selectedExchange = ref('')
 
 const isChinaMarket = (market?: string) => market === 'A股' || market === 'A股ETF'
 const isAshareEtfCode = (code?: string) => /^(159\d{3}|(?:51|56|58)\d{4})$/.test(String(code || '').trim())
+const tagsSortValue = (row: FavoriteItem) => (row.tags || []).join('、')
+const sortByTags = (a: FavoriteItem, b: FavoriteItem) => tagsSortValue(a).localeCompare(tagsSortValue(b), 'zh-Hans-CN')
 
 // 批量选择
 const selectedStocks = ref<FavoriteItem[]>([])
@@ -712,9 +728,10 @@ const filteredFavorites = computed<FavoriteItem[]>(() => {
   }
 
   // 标签筛选
-  if (selectedTag.value) {
+  if (selectedTags.value.length > 0) {
+    const tagSet = new Set(selectedTags.value)
     result = result.filter((item: FavoriteItem) =>
-      (item.tags || []).includes(selectedTag.value)
+      (item.tags || []).some(tag => tagSet.has(tag))
     )
   }
 

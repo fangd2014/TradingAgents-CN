@@ -2,6 +2,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import time
 import json
 import traceback
+from typing import Any, Dict, Optional
 
 # 导入分析模块日志装饰器
 from tradingagents.utils.tool_logging import log_analyst_module
@@ -93,6 +94,52 @@ def _get_company_name(ticker: str, market_info: dict) -> str:
         return f"股票{ticker}"
 
 
+def _format_quote_number(value: Any, digits: int = 2, suffix: str = "") -> str:
+    if value is None or value == "":
+        return "N/A"
+    try:
+        return f"{float(value):.{digits}f}{suffix}"
+    except (TypeError, ValueError):
+        return f"{value}{suffix}"
+
+
+def _format_latest_quote_block(quote: Optional[Dict[str, Any]], currency_symbol: str) -> str:
+    if not quote:
+        return "非A股标的未启用A股实时行情强制校验。"
+
+    return "\n".join(
+        [
+            "最新实时行情（当前价格唯一权威来源，历史K线只用于技术指标，不得覆盖以下数值）：",
+            f"- 当前价格：{currency_symbol}{_format_quote_number(quote.get('close'))}",
+            f"- 涨跌幅：{_format_quote_number(quote.get('pct_chg'), suffix='%')}",
+            f"- 成交量：{_format_quote_number(quote.get('volume'), digits=0)}股",
+            f"- 行情交易日：{quote.get('trade_date') or quote.get('datetime') or 'N/A'}",
+            f"- 数据源：{quote.get('source') or 'external_quotes'}",
+        ]
+    )
+
+
+def _format_quote_basic_info_lines(quote: Optional[Dict[str, Any]], currency_symbol: str) -> str:
+    if not quote:
+        return "\n".join(
+            [
+                f"- **当前价格**：[从工具数据中获取] {currency_symbol}",
+                "- **涨跌幅**：[从工具数据中获取]",
+                "- **成交量**：[从工具数据中获取]",
+            ]
+        )
+
+    return "\n".join(
+        [
+            f"- **当前价格**：{currency_symbol}{_format_quote_number(quote.get('close'))}",
+            f"- **涨跌幅**：{_format_quote_number(quote.get('pct_chg'), suffix='%')}",
+            f"- **成交量**：{_format_quote_number(quote.get('volume'), digits=0)}股",
+            f"- **行情交易日**：{quote.get('trade_date') or quote.get('datetime') or 'N/A'}",
+            f"- **行情数据源**：{quote.get('source') or 'external_quotes'}",
+        ]
+    )
+
+
 def create_market_analyst(llm, toolkit):
 
     def market_analyst_node(state):
@@ -117,9 +164,24 @@ def create_market_analyst(llm, toolkit):
 
         logger.debug(f"📈 [DEBUG] 股票类型检查: {ticker} -> {market_info['market_name']} ({market_info['currency_name']})")
 
+        latest_quote = None
+        if market_info.get('is_china'):
+            from tradingagents.dataflows.data_source_manager import require_latest_external_quote
+
+            latest_quote = require_latest_external_quote(ticker, context="生成市场技术分析报告")
+            logger.info(
+                "✅ [市场分析师] 使用直连最新行情: code=%s price=%s pct=%s source=%s",
+                ticker,
+                latest_quote.get("close"),
+                latest_quote.get("pct_chg"),
+                latest_quote.get("source"),
+            )
+
         # 获取公司名称
         company_name = _get_company_name(ticker, market_info)
         instrument_context = build_instrument_context(ticker)
+        latest_quote_block = _format_latest_quote_block(latest_quote, market_info['currency_symbol'])
+        latest_quote_basic_info_lines = _format_quote_basic_info_lines(latest_quote, market_info['currency_symbol'])
         logger.debug(f"📈 [DEBUG] 公司名称: {ticker} -> {company_name}")
 
         # 统一使用 get_stock_market_data_unified 工具
@@ -154,6 +216,9 @@ def create_market_analyst(llm, toolkit):
                     "- 分析日期：{current_date}\n"
                     "- 标的约束：{instrument_context}\n"
                     "\n"
+                    "📌 **实时行情约束：**\n"
+                    "{latest_quote_block}\n"
+                    "\n"
                     "🔧 **工具使用：**\n"
                     "你可以使用以下工具：{tool_names}\n"
                     "⚠️ 重要工作流程：\n"
@@ -172,6 +237,7 @@ def create_market_analyst(llm, toolkit):
                     "- 公司名称：{company_name}\n"
                     "- 股票代码：{ticker}\n"
                     "- 所属市场：{market_name}\n"
+                    "{latest_quote_basic_info_lines}\n"
                     "\n"
                     "## 📈 技术指标分析\n"
                     "[在这里分析移动平均线、MACD、RSI、布林带等技术指标，提供具体数值]\n"
@@ -193,6 +259,7 @@ def create_market_analyst(llm, toolkit):
                     "- 筹码峰判断不能单独作为买卖依据，必须结合成交量、K线趋势、基本面和市场环境给出风险提示\n"
                     "- 如果你有明确的技术面投资建议（买入/持有/卖出），请在投资建议部分明确标注\n"
                     "- 不要使用'最终交易建议'前缀，因为最终决策需要综合所有分析师的意见\n"
+                    "- 当前价格、涨跌幅、成交量必须使用“实时行情约束”中的数值，不得使用历史K线最后一行覆盖\n"
                     "\n"
                     "请使用中文，基于真实数据进行分析。",
                 ),
@@ -219,6 +286,8 @@ def create_market_analyst(llm, toolkit):
         prompt = prompt.partial(currency_name=market_info['currency_name'])
         prompt = prompt.partial(currency_symbol=market_info['currency_symbol'])
         prompt = prompt.partial(instrument_context=instrument_context)
+        prompt = prompt.partial(latest_quote_block=latest_quote_block)
+        prompt = prompt.partial(latest_quote_basic_info_lines=latest_quote_basic_info_lines)
 
         # 添加详细日志
         logger.info(f"📊 [市场分析师] LLM类型: {llm.__class__.__name__}")
@@ -367,6 +436,9 @@ def create_market_analyst(llm, toolkit):
 - 所属市场：{market_info['market_name']}
 - 计价货币：{market_info['currency_name']}（{market_info['currency_symbol']}）
 
+**最新实时行情约束（当前价格唯一权威来源，历史K线只用于技术指标，不得覆盖以下数值）：**
+{latest_quote_block}
+
 **输出格式要求（必须严格遵守）：**
 
 请按照以下专业格式输出报告，不要使用emoji符号（如📊📈📉💭等），使用纯文本标题：
@@ -381,9 +453,7 @@ def create_market_analyst(llm, toolkit):
 - **公司名称**：{company_name}
 - **股票代码**：{ticker}
 - **所属市场**：{market_info['market_name']}
-- **当前价格**：[从工具数据中获取] {market_info['currency_symbol']}
-- **涨跌幅**：[从工具数据中获取]
-- **成交量**：[从工具数据中获取]
+{latest_quote_basic_info_lines}
 
 ---
 
@@ -478,6 +548,7 @@ def create_market_analyst(llm, toolkit):
 - 确保在分析中正确使用公司名称"{company_name}"和股票代码"{ticker}"
 - 报告标题必须是：# **{company_name}（{ticker}）技术分析报告**
 - 报告必须基于工具返回的真实数据进行分析
+- 当前价格、涨跌幅、成交量必须使用“最新实时行情约束”中的数值；工具数据里的历史K线最后一行只能用于技术指标
 - 包含具体的技术指标数值和专业分析
 - 提供明确的投资建议和风险提示
 - 报告长度不少于800字

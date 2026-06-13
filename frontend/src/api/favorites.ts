@@ -20,6 +20,7 @@ export interface FavoriteItem {
   total_mv?: number | null
   float_mv?: number | null
   turnover_rate?: number | null
+  amplitude?: number | null
   limit_up?: number | null
   limit_down?: number | null
   quote_source?: string | null

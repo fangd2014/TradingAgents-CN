@@ -9,7 +9,7 @@ import logging
 
 from app.routers.auth_db import get_current_user
 from app.models.user import User, FavoriteStock
-from app.services.favorites_service import favorites_service
+from app.services.favorites_service import calculate_amplitude, favorites_service
 from app.core.response import ok
 
 logger = logging.getLogger("webapi")
@@ -65,6 +65,11 @@ async def _sync_external_realtime_quotes(symbols: List[str]) -> dict:
             "change_percent": quote.get("pct_chg"),
             "amount": quote.get("amount"),
             "volume": quote.get("volume"),
+            "open": quote.get("open"),
+            "high": quote.get("high"),
+            "low": quote.get("low"),
+            "pre_close": quote.get("pre_close"),
+            "amplitude": calculate_amplitude(quote),
             "source": quote.get("source") or "external_quotes",
             "data_source": quote.get("source") or "external_quotes",
             "datetime": quote.get("datetime"),

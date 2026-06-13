@@ -511,6 +511,69 @@
           </div>
         </el-card>
 
+        <el-card shadow="hover" class="statements-summary-card">
+          <template #header>
+            <div class="card-hd">
+              <div>财务报表</div>
+              <el-button text size="small" :icon="Refresh" :loading="insightLoading.financial" @click="loadFinancialDetail(true)">刷新</el-button>
+            </div>
+          </template>
+
+          <el-alert v-if="insightError.financial" type="warning" :title="insightError.financial" show-icon />
+          <el-skeleton v-else-if="insightLoading.financial" :rows="5" animated />
+          <template v-else-if="financialDetail">
+            <div class="statement-meta">
+              <span>报告期：{{ financialDetail.summary?.report_period || '-' }}</span>
+              <span>来源：{{ financialDetail.source || '-' }}</span>
+            </div>
+            <el-tabs class="side-statement-tabs" stretch>
+              <el-tab-pane label="利润表">
+                <el-table :data="incomeStatementRows" size="small" height="220">
+                  <el-table-column prop="end_date" label="报告期" width="96" />
+                  <el-table-column prop="revenue" label="营收">
+                    <template #default="{ row }">{{ fmtYi(row.revenue) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="n_income_attr_p" label="归母净利">
+                    <template #default="{ row }">{{ fmtYi(row.n_income_attr_p) }}</template>
+                  </el-table-column>
+                </el-table>
+              </el-tab-pane>
+              <el-tab-pane label="资产负债表">
+                <el-table :data="balanceSheetRows" size="small" height="220">
+                  <el-table-column prop="end_date" label="报告期" width="96" />
+                  <el-table-column prop="total_assets" label="总资产">
+                    <template #default="{ row }">{{ fmtYi(row.total_assets) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="total_liab" label="总负债">
+                    <template #default="{ row }">{{ fmtYi(row.total_liab) }}</template>
+                  </el-table-column>
+                </el-table>
+              </el-tab-pane>
+              <el-tab-pane label="现金流量表">
+                <el-table :data="cashflowStatementRows" size="small" height="220">
+                  <el-table-column prop="end_date" label="报告期" width="96" />
+                  <el-table-column prop="n_cashflow_act" label="经营现金流">
+                    <template #default="{ row }">{{ fmtYi(row.n_cashflow_act) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="n_cashflow_fin_act" label="筹资现金流">
+                    <template #default="{ row }">{{ fmtYi(row.n_cashflow_fin_act) }}</template>
+                  </el-table-column>
+                </el-table>
+              </el-tab-pane>
+              <el-tab-pane label="主营业务">
+                <el-table :data="mainBusinessRows" size="small" height="220">
+                  <el-table-column prop="end_date" label="报告期" width="96" />
+                  <el-table-column prop="bz_item" label="项目" min-width="120" show-overflow-tooltip />
+                  <el-table-column prop="bz_sales" label="收入">
+                    <template #default="{ row }">{{ fmtYi(row.bz_sales) }}</template>
+                  </el-table-column>
+                </el-table>
+              </el-tab-pane>
+            </el-tabs>
+          </template>
+          <el-empty v-else description="暂无财务报表" />
+        </el-card>
+
 
 
         <!-- 快捷操作 -->
@@ -771,6 +834,7 @@ const selectedShareholderRows = computed(() => {
 const incomeStatementRows = computed(() => recentTenYearStatementRows(financialDetail.value?.income_statement || []))
 const balanceSheetRows = computed(() => recentTenYearStatementRows(financialDetail.value?.balance_sheet || []))
 const cashflowStatementRows = computed(() => recentTenYearStatementRows(financialDetail.value?.cashflow_statement || []))
+const mainBusinessRows = computed(() => recentTenYearStatementRows(financialDetail.value?.main_business || []))
 
 const incomeStatementChartOption = computed<EChartsOption>(() => buildStatementBarOption(
   incomeStatementRows.value,
@@ -1915,6 +1979,23 @@ function exportReport() {
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fact { display: flex; flex-direction: column; font-size: 12px; }
 .fact b { font-size: 14px; color: var(--el-text-color-primary); }
+
+.statements-summary-card { margin-top: 16px; }
+.statement-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.side-statement-tabs :deep(.el-tabs__item) {
+  padding: 0 8px;
+  font-size: 12px;
+}
+.side-statement-tabs :deep(.el-table) {
+  font-size: 12px;
+}
 
 .quick-actions { display: flex; flex-direction: column; gap: 8px; }
 

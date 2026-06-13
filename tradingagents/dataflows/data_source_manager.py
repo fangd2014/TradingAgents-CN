@@ -224,10 +224,11 @@ class DataSourceManager:
             logger.warning(f"⚠️ [数据源优先级] 从数据库读取失败: {e}，使用默认顺序")
 
         # 🔥 回退到默认顺序（兼容性）
-        # 默认顺序：AKShare > Tushare > BaoStock
+        # 历史行情默认顺序：Tushare > mootdx > AKShare > BaoStock
         default_order = [
-            ChinaDataSource.AKSHARE,
             ChinaDataSource.TUSHARE,
+            ChinaDataSource.MOOTDX,
+            ChinaDataSource.AKSHARE,
             ChinaDataSource.BAOSTOCK,
         ]
         # 只返回可用的数据源
@@ -272,8 +273,8 @@ class DataSourceManager:
         if self.use_mongodb_cache:
             return ChinaDataSource.MONGODB
 
-        # 从环境变量获取，默认使用AKShare作为第一优先级数据源
-        env_source = os.getenv('DEFAULT_CHINA_DATA_SOURCE', DataSourceCode.AKSHARE).lower()
+        # 从环境变量获取，默认使用Tushare作为第一优先级数据源
+        env_source = os.getenv('DEFAULT_CHINA_DATA_SOURCE', DataSourceCode.TUSHARE).lower()
 
         # 映射到枚举（使用统一编码）
         source_mapping = {
@@ -650,7 +651,13 @@ class DataSourceManager:
         """获取Tushare提供器（原adapter已废弃，现在直接使用provider）"""
         try:
             from .providers.china.tushare import get_tushare_provider
-            return get_tushare_provider()
+            provider = get_tushare_provider()
+            if not provider.is_available():
+                try:
+                    provider.connect_sync()
+                except Exception as exc:
+                    logger.warning("⚠️ Tushare提供器连接失败: %s", exc)
+            return provider
         except ImportError as e:
             logger.error(f"❌ Tushare提供器导入失败: {e}")
             return None
@@ -910,10 +917,28 @@ class DataSourceManager:
             logger.info(f"🔍 [技术指标详情] ===== 数据详情结束 =====")
 
             # 计算最新价格和涨跌幅
-            latest_price = latest_data.get('close', 0)
+            quote = _fetch_latest_external_quote(symbol)
+            quote_price = None
+            if quote and quote.get("close") is not None:
+                try:
+                    quote_price = float(quote.get("close"))
+                except (TypeError, ValueError):
+                    quote_price = None
+            latest_price = quote_price if quote_price is not None else latest_data.get('close', 0)
             prev_close = data.iloc[-2].get('close', latest_price) if len(data) > 1 else latest_price
             change = latest_price - prev_close
             change_pct = (change / prev_close * 100) if prev_close != 0 else 0
+            if quote and quote.get("pct_chg") is not None:
+                try:
+                    change_pct = float(quote.get("pct_chg"))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    pre_close = float(quote.get("pre_close"))
+                except (TypeError, ValueError):
+                    pre_close = None
+                if pre_close not in (None, 0):
+                    change = latest_price - pre_close
 
             # 格式化数据报告
             result = f"📊 {stock_name}({symbol}) - 技术分析数据\n"
@@ -922,6 +947,19 @@ class DataSourceManager:
 
             result += f"💰 最新价格: ¥{latest_price:.2f}\n"
             result += f"📈 涨跌额: {change:+.2f} ({change_pct:+.2f}%)\n\n"
+            if quote:
+                quote_date = quote.get("trade_date") or quote.get("datetime") or "-"
+                try:
+                    quote_volume = float(quote.get("volume")) if quote.get("volume") is not None else None
+                except (TypeError, ValueError):
+                    quote_volume = None
+                quote_source = quote.get("source") or "external_quotes"
+                result += "⚠️ 最新实时行情（当前价格唯一权威来源，历史K线仅用于技术指标）:\n"
+                result += f"   当前价格: ¥{latest_price:.2f}\n"
+                result += f"   涨跌幅: {change_pct:+.2f}%\n"
+                result += f"   成交量: {quote_volume:,.0f}股\n" if quote_volume is not None else "   成交量: N/A\n"
+                result += f"   行情日期: {quote_date}\n"
+                result += f"   数据源: {quote_source}\n\n"
 
             # 添加技术指标
             result += f"📊 移动平均线 (MA):\n"

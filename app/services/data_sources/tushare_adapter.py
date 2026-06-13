@@ -50,17 +50,20 @@ class TushareAdapter(DataSourceAdapter):
         token = self._provider._get_token_from_database() or self._provider.config.get("token")
         return bool(token and not str(token).startswith("your_"))
 
+    def _ensure_connected(self) -> bool:
+        if self._provider is None or not self.is_available():
+            return False
+        if self._provider.is_available():
+            return True
+        try:
+            self._provider.connect_sync()
+        except Exception as e:
+            logger.warning(f"Tushare: Failed to connect: {e}")
+        return self._provider.is_available()
+
     def get_stock_list(self) -> Optional[pd.DataFrame]:
         """Get stock list"""
-        # 如果未连接，尝试连接
-        if self._provider and not self.is_available():
-            logger.info("Tushare: Provider not connected, attempting to connect...")
-            try:
-                self._provider.connect_sync()
-            except Exception as e:
-                logger.warning(f"Tushare: Failed to connect: {e}")
-
-        if not self.is_available():
+        if not self._ensure_connected():
             logger.warning("Tushare: Provider is not available")
             return None
         try:
@@ -75,7 +78,7 @@ class TushareAdapter(DataSourceAdapter):
 
     def get_daily_basic(self, trade_date: str) -> Optional[pd.DataFrame]:
         """Get daily basic financial data"""
-        if not self.is_available():
+        if not self._ensure_connected():
             return None
         try:
             # 🔥 新增 ps, ps_ttm, total_share, float_share 字段
@@ -95,7 +98,7 @@ class TushareAdapter(DataSourceAdapter):
         """Get full-market near real-time quotes via Tushare rt_k fallback
         Returns dict keyed by 6-digit code: {'000001': {'close': ..., 'pct_chg': ..., 'amount': ...}}
         """
-        if not self.is_available():
+        if not self._ensure_connected():
             return None
         try:
             df = self._provider.api.rt_k(ts_code='3*.SZ,6*.SH,0*.SZ,9*.BJ')  # type: ignore
@@ -166,7 +169,7 @@ class TushareAdapter(DataSourceAdapter):
         adj: None/qfq/hfq
         Returns: list of {time, open, high, low, close, volume, amount}
         """
-        if not self.is_available():
+        if not self._ensure_connected():
             return None
         try:
             from tushare.pro.data_pro import pro_bar
@@ -235,7 +238,7 @@ class TushareAdapter(DataSourceAdapter):
         """Try to fetch news/announcements via tushare pro api if available.
         Returns list of {title, source, time, url, type}
         """
-        if not self.is_available():
+        if not self._ensure_connected():
             return None
         api = self._provider.api if self._provider else None
         if api is None:
@@ -288,7 +291,7 @@ class TushareAdapter(DataSourceAdapter):
 
     def find_latest_trade_date(self) -> Optional[str]:
         """Find the previous open trading date from Tushare trade calendar."""
-        if not self.is_available():
+        if not self._ensure_connected():
             return None
         try:
             today = datetime.now()

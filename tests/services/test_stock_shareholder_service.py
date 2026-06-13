@@ -1,6 +1,7 @@
 import pytest
 
-from app.services.stock_shareholder_service import StockShareholderService
+from app.services import stock_shareholder_service as shareholder_module
+from app.services.stock_shareholder_service import StockShareholderService, fetch_tushare_shareholder_rows_sync
 
 
 class FakeCursor:
@@ -146,6 +147,43 @@ async def test_shareholders_uses_cache_and_computes_period_changes():
     assert {item["change_type"] for item in result["changes"]["items"]} >= {"increased", "new", "exited"}
 
 
+@pytest.mark.asyncio
+async def test_shareholders_skips_incomplete_latest_period():
+    docs = [
+        {
+            "code": "001309",
+            "holder_scope": "top10",
+            "end_date": "20260331",
+            "rank": 1,
+            "holder_name": "单行股东",
+            "holder_name_normalized": "单行股东",
+            "hold_amount": 100,
+            "hold_ratio": 10,
+        }
+    ]
+    docs.extend(
+        {
+            "code": "001309",
+            "holder_scope": "top10",
+            "end_date": "20250630",
+            "rank": rank,
+            "holder_name": f"完整股东{rank}",
+            "holder_name_normalized": f"完整股东{rank}",
+            "hold_amount": 100 - rank,
+            "hold_ratio": 10 - rank / 10,
+        }
+        for rank in range(1, 11)
+    )
+    db = FakeDb({"stock_shareholders": FakeCollection(docs)})
+    service = StockShareholderService(db=db)
+
+    result = await service.get_shareholders("001309", scope="top10", periods=4, refresh=False)
+
+    assert result["status"] == "ok"
+    assert result["latest_period"] == "20250630"
+    assert len(result["latest"]) == 10
+
+
 def test_normalize_tushare_holder_rows_supports_top10_and_float_scopes():
     top10_row = {
         "ts_code": "688049.SH",
@@ -175,6 +213,55 @@ def test_normalize_tushare_holder_rows_supports_top10_and_float_scopes():
     assert top10["hold_change"] == 1.5
     assert floating["holder_scope"] == "float_top10"
     assert floating["rank"] == 2
+
+
+def test_tushare_shareholders_raw_http_fallback_when_sdk_returns_empty(monkeypatch):
+    class EmptyDf:
+        empty = True
+
+    class FakeApi:
+        @staticmethod
+        def top10_holders(ts_code):
+            assert ts_code == "001309.SZ"
+            return EmptyDf()
+
+    class FakeProvider:
+        api = FakeApi()
+        config = {"token": "token"}
+
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def _get_token_from_database():
+            return "token"
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.providers.china.tushare.get_tushare_provider",
+        lambda: FakeProvider(),
+    )
+    monkeypatch.setattr(
+        shareholder_module,
+        "_fetch_tushare_raw_rows_sync",
+        lambda api_name, ts_code, token: [
+            {
+                "ts_code": ts_code,
+                "ann_date": "20260430",
+                "end_date": "20260331",
+                "holder_name": "李虎",
+                "hold_amount": 79410129.0,
+                "hold_ratio": 35.0062,
+            }
+        ],
+    )
+
+    rows = fetch_tushare_shareholder_rows_sync("001309", "top10")
+
+    assert rows[0]["code"] == "001309"
+    assert rows[0]["holder_scope"] == "top10"
+    assert rows[0]["holder_name"] == "李虎"
+    assert rows[0]["hold_amount"] == 79410129.0
 
 
 @pytest.mark.asyncio

@@ -123,6 +123,30 @@ def test_latest_quote_requirement_reports_failure_reason(monkeypatch):
     assert "Tencent Finance/mootdx returned no quote" in message
 
 
+def test_market_analyst_formats_latest_quote_as_authoritative_source():
+    from tradingagents.agents.analysts.market_analyst import (
+        _format_latest_quote_block,
+        _format_quote_basic_info_lines,
+    )
+
+    quote = {
+        "close": 617.43,
+        "pct_chg": -2.36,
+        "volume": 152458,
+        "trade_date": "20260612",
+        "source": "tencent_finance",
+    }
+
+    block = _format_latest_quote_block(quote, "¥")
+    lines = _format_quote_basic_info_lines(quote, "¥")
+
+    assert "当前价格唯一权威来源" in block
+    assert "¥617.43" in block
+    assert "-2.36%" in lines
+    assert "152458股" in lines
+    assert "[从工具数据中获取]" not in lines
+
+
 def test_stock_data_falls_back_to_mootdx_kline(monkeypatch):
     from tradingagents.dataflows import data_source_manager as manager_module
     from tradingagents.dataflows.data_source_manager import ChinaDataSource, DataSourceManager
