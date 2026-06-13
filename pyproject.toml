@@ -41,6 +41,7 @@ dependencies = [
     "baostock>=0.8.8",
     "eodhd>=1.0.32",
     "finnhub-python>=2.4.23",
+    "mootdx>=0.11.7",
     "pywencai>=0.13.1",
     "tushare>=1.4.21",
     "yfinance>=0.2.63",

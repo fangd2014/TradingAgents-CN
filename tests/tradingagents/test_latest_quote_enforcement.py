@@ -123,6 +123,56 @@ def test_latest_quote_requirement_reports_failure_reason(monkeypatch):
     assert "Tencent Finance/mootdx returned no quote" in message
 
 
+def test_stock_data_falls_back_to_mootdx_kline(monkeypatch):
+    from tradingagents.dataflows import data_source_manager as manager_module
+    from tradingagents.dataflows.data_source_manager import ChinaDataSource, DataSourceManager
+
+    monkeypatch.setattr(DataSourceManager, "_check_mongodb_enabled", lambda self: True)
+    monkeypatch.setattr(DataSourceManager, "_get_default_source", lambda self: ChinaDataSource.MONGODB)
+    monkeypatch.setattr(DataSourceManager, "_check_available_sources", lambda self: [ChinaDataSource.MOOTDX])
+    monkeypatch.setattr(
+        DataSourceManager,
+        "_get_data_source_priority_order",
+        lambda self, symbol=None: [ChinaDataSource.MOOTDX],
+    )
+    monkeypatch.setattr(
+        DataSourceManager,
+        "_get_mongodb_data",
+        lambda self, symbol, start_date, end_date, period="daily": (
+            f"❌ MongoDB中未找到{symbol}的历史行情数据",
+            "mongodb",
+        ),
+    )
+    monkeypatch.setattr(
+        DataSourceManager,
+        "get_stock_info",
+        lambda self, symbol: {"code": symbol, "name": "德明利"},
+    )
+
+    class FakeMootdxService:
+        @staticmethod
+        def get_kline(symbol, period="day", limit=120):
+            return [
+                {"date": "2026-06-08", "open": 600, "high": 620, "low": 590, "close": 610, "volume": 1000},
+                {"date": "2026-06-09", "open": 610, "high": 630, "low": 605, "close": 625, "volume": 1200},
+                {"date": "2026-06-10", "open": 625, "high": 640, "low": 615, "close": 632, "volume": 1300},
+                {"date": "2026-06-11", "open": 632, "high": 664, "low": 620, "close": 632.35, "volume": 1500},
+                {"date": "2026-06-12", "open": 662.1, "high": 664, "low": 617.43, "close": 617.43, "volume": 152458},
+            ]
+
+    monkeypatch.setattr(
+        "app.services.china_external_data_service.MootdxDeepMarketService",
+        lambda: FakeMootdxService(),
+    )
+
+    result = DataSourceManager().get_stock_data("001309", "2026-06-08", "2026-06-12")
+
+    assert "德明利(001309)" in result
+    assert "技术分析数据" in result
+    assert "最新价格: ¥617.43" in result
+    assert "所有数据源都无法获取" not in result
+
+
 def test_fundamentals_report_interrupts_when_latest_quote_unavailable(monkeypatch):
     from tradingagents.dataflows import optimized_china_data
     from tradingagents.dataflows.data_source_manager import LatestQuoteUnavailableError

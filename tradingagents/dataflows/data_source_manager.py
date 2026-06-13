@@ -37,6 +37,7 @@ class ChinaDataSource(Enum):
     TUSHARE = DataSourceCode.TUSHARE
     AKSHARE = DataSourceCode.AKSHARE
     BAOSTOCK = DataSourceCode.BAOSTOCK
+    MOOTDX = DataSourceCode.MOOTDX
 
 
 class USDataSource(Enum):
@@ -200,6 +201,7 @@ class DataSourceManager:
                     DataSourceCode.TUSHARE: ChinaDataSource.TUSHARE,
                     DataSourceCode.AKSHARE: ChinaDataSource.AKSHARE,
                     DataSourceCode.BAOSTOCK: ChinaDataSource.BAOSTOCK,
+                    DataSourceCode.MOOTDX: ChinaDataSource.MOOTDX,
                 }
 
                 result = []
@@ -278,6 +280,7 @@ class DataSourceManager:
             DataSourceCode.TUSHARE: ChinaDataSource.TUSHARE,
             DataSourceCode.AKSHARE: ChinaDataSource.AKSHARE,
             DataSourceCode.BAOSTOCK: ChinaDataSource.BAOSTOCK,
+            DataSourceCode.MOOTDX: ChinaDataSource.MOOTDX,
         }
 
         return source_mapping.get(env_source, ChinaDataSource.AKSHARE)
@@ -499,11 +502,11 @@ class DataSourceManager:
             else:
                 logger.warning("⚠️ [数据源配置] 数据库中没有数据源配置，将检查所有已安装的数据源")
                 # 如果数据库中没有配置，默认所有数据源都启用
-                enabled_sources_in_db = {'mongodb', 'tushare', 'akshare', 'baostock'}
+                enabled_sources_in_db = {'mongodb', 'tushare', 'akshare', 'baostock', 'mootdx'}
         except Exception as e:
             logger.warning(f"⚠️ [数据源配置] 从数据库读取失败: {e}，将检查所有已安装的数据源")
             # 如果读取失败，默认所有数据源都启用
-            enabled_sources_in_db = {'mongodb', 'tushare', 'akshare', 'baostock'}
+            enabled_sources_in_db = {'mongodb', 'tushare', 'akshare', 'baostock', 'mootdx'}
 
         # 检查MongoDB（最高优先级）
         if self.use_mongodb_cache and 'mongodb' in enabled_sources_in_db:
@@ -562,8 +565,16 @@ class DataSourceManager:
         else:
             logger.info("ℹ️ BaoStock数据源已在数据库中禁用")
 
-        # TDX (通达信) 已移除
-        # 不再检查和支持 TDX 数据源
+        # mootdx (通达信TCP协议)
+        if 'mootdx' in enabled_sources_in_db:
+            try:
+                import mootdx  # noqa: F401
+                available.append(ChinaDataSource.MOOTDX)
+                logger.info("✅ mootdx数据源可用且已启用")
+            except ImportError:
+                logger.warning("⚠️ mootdx数据源不可用: 库未安装")
+        else:
+            logger.info("ℹ️ mootdx数据源已在数据库中禁用")
 
         return available
 
@@ -620,6 +631,8 @@ class DataSourceManager:
             return self._get_akshare_adapter()
         elif self.current_source == ChinaDataSource.BAOSTOCK:
             return self._get_baostock_adapter()
+        elif self.current_source == ChinaDataSource.MOOTDX:
+            return self._get_mootdx_adapter()
         # TDX 已移除
         else:
             raise ValueError(f"不支持的数据源: {self.current_source}")
@@ -658,6 +671,15 @@ class DataSourceManager:
             return get_baostock_provider()
         except ImportError as e:
             logger.error(f"❌ BaoStock适配器导入失败: {e}")
+            return None
+
+    def _get_mootdx_adapter(self):
+        """获取mootdx深行情服务。"""
+        try:
+            from app.services.china_external_data_service import MootdxDeepMarketService
+            return MootdxDeepMarketService()
+        except ImportError as e:
+            logger.error(f"❌ mootdx适配器导入失败: {e}")
             return None
 
     # TDX 适配器已移除
@@ -1190,6 +1212,9 @@ class DataSourceManager:
             elif self.current_source == ChinaDataSource.BAOSTOCK:
                 result = self._get_baostock_data(symbol, start_date, end_date, period)
                 actual_source = "baostock"
+            elif self.current_source == ChinaDataSource.MOOTDX:
+                result = self._get_mootdx_data(symbol, start_date, end_date, period)
+                actual_source = "mootdx"
             # TDX 已移除
             else:
                 result = f"❌ 不支持的数据源: {self.current_source.value}"
@@ -1427,6 +1452,69 @@ class DataSourceManager:
         else:
             return f"❌ 未能获取{symbol}的股票数据"
 
+    def _get_mootdx_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> str:
+        """使用mootdx获取多周期K线数据 - 包含技术指标计算。"""
+        period_map = {
+            "daily": "day",
+            "day": "day",
+            "weekly": "week",
+            "week": "week",
+            "monthly": "month",
+            "month": "month",
+        }
+        service_period = period_map.get(period, "day")
+
+        try:
+            from app.services.china_external_data_service import MootdxDeepMarketService
+
+            limit = 800
+            records = MootdxDeepMarketService().get_kline(symbol, period=service_period, limit=limit)
+            if not records:
+                return f"❌ mootdx未获取到{symbol}的{period}数据"
+
+            df = pd.DataFrame(records)
+            if df.empty:
+                return f"❌ mootdx未获取到{symbol}的{period}数据"
+
+            # mootdx常见日期字段为datetime，部分版本返回year/month/day。
+            if "date" not in df.columns:
+                if "datetime" in df.columns:
+                    df["date"] = df["datetime"]
+                elif {"year", "month", "day"}.issubset(df.columns):
+                    df["date"] = pd.to_datetime(
+                        df[["year", "month", "day"]].astype(str).agg("-".join, axis=1),
+                        errors="coerce",
+                    )
+
+            for column in ("open", "high", "low", "close", "vol", "volume", "amount"):
+                if column in df.columns:
+                    df[column] = pd.to_numeric(df[column], errors="coerce")
+
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                if start_date:
+                    df = df[df["date"] >= pd.to_datetime(start_date)]
+                if end_date:
+                    df = df[df["date"] <= pd.to_datetime(end_date)]
+
+            df = self._standardize_dataframe(df)
+            if df.empty or "close" not in df.columns:
+                return f"❌ mootdx未获取到{symbol}的有效{period}数据"
+
+            stock_name = f"股票{symbol}"
+            try:
+                stock_info = self.get_stock_info(symbol)
+                stock_name = stock_info.get("name") or stock_info.get("stock_name") or stock_name
+            except Exception as exc:
+                logger.debug("mootdx K线获取股票名称失败: %s", exc)
+
+            result = self._format_stock_data_response(df, symbol, stock_name, start_date, end_date)
+            logger.info(f"✅ [mootdx] 已计算技术指标: MA5/10/20/60, MACD, RSI, BOLL")
+            return result
+        except Exception as e:
+            logger.error(f"❌ [mootdx] 获取{symbol}{period}数据失败: {e}", exc_info=True)
+            return f"❌ mootdx获取{symbol}数据失败: {e}"
+
     # TDX 数据获取方法已移除
     # def _get_tdx_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> str:
     #     """使用TDX获取多周期数据 (已移除)"""
@@ -1477,7 +1565,8 @@ class DataSourceManager:
                         result = self._get_akshare_data(symbol, start_date, end_date, period)
                     elif source == ChinaDataSource.BAOSTOCK:
                         result = self._get_baostock_data(symbol, start_date, end_date, period)
-                    # TDX 已移除
+                    elif source == ChinaDataSource.MOOTDX:
+                        result = self._get_mootdx_data(symbol, start_date, end_date, period)
                     else:
                         logger.warning(f"⚠️ 未知数据源: {source.value}")
                         continue
