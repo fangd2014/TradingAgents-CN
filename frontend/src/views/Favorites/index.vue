@@ -128,21 +128,6 @@
         </el-table-column>
 
         <el-table-column prop="stock_name" label="股票名称" width="150" />
-        <el-table-column prop="market" label="市场" width="80">
-          <template #default="{ row }">
-            {{ row.market || 'A股' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="board" label="板块" width="100">
-          <template #default="{ row }">
-            {{ row.board || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="exchange" label="交易所" width="140">
-          <template #default="{ row }">
-            {{ row.exchange || '-' }}
-          </template>
-        </el-table-column>
 
         <el-table-column prop="current_price" label="当前价格" width="100">
           <template #default="{ row }">
@@ -193,6 +178,22 @@
             >
               {{ tag }}
             </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="market" label="市场" width="80">
+          <template #default="{ row }">
+            {{ row.market || 'A股' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="board" label="板块" width="100">
+          <template #default="{ row }">
+            {{ row.board || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="exchange" label="交易所" width="140">
+          <template #default="{ row }">
+            {{ row.exchange || '-' }}
           </template>
         </el-table-column>
 
