@@ -15,6 +15,9 @@ TUSHARE_WEB_COOKIE_ALIASES = (
     "tushare_web_cookie",
     "web_cookie",
 )
+IWENCAI_COOKIE_ENV_KEY = "IWENCAI_COOKIE"
+TUSHARE_TOKEN_ENV_KEY = "TUSHARE_TOKEN"
+TUSHARE_API_URL_ENV_KEY = "TUSHARE_API_URL"
 
 
 def source_type_to_string(source_type: Any) -> str:
@@ -117,6 +120,43 @@ def bridge_sensitive_config_params_to_env(
     env = env if env is not None else os.environ
     env[CANONICAL_TUSHARE_WEB_COOKIE_KEY] = cookie
     return 1
+
+
+def bridge_datasource_credentials_to_env(
+    source_type: Any,
+    api_key: Optional[Any] = None,
+    endpoint: Optional[Any] = None,
+    env: Optional[MutableMapping[str, str]] = None,
+) -> int:
+    """将数据源主凭据桥接到运行时环境变量。"""
+    source = source_type_to_string(source_type)
+    env = env if env is not None else os.environ
+    bridged = 0
+
+    cleaned_api_key = _clean_sensitive_value(api_key)
+    if cleaned_api_key and not _should_preserve_sensitive_value(cleaned_api_key):
+        if source == "tushare":
+            env[TUSHARE_TOKEN_ENV_KEY] = cleaned_api_key
+            bridged += 1
+        elif source in {"iwencai", "ths_hotspot"}:
+            env[IWENCAI_COOKIE_ENV_KEY] = cleaned_api_key
+            bridged += 1
+
+    cleaned_endpoint = _clean_sensitive_value(endpoint)
+    if source == "tushare" and cleaned_endpoint:
+        env[TUSHARE_API_URL_ENV_KEY] = normalize_tushare_api_url(cleaned_endpoint)
+        bridged += 1
+
+    return bridged
+
+
+def normalize_tushare_api_url(value: Optional[Any]) -> str:
+    """规范化 Tushare Pro API 地址，兼容旧的 tushare.pro 页面地址配置。"""
+    api_url = _clean_sensitive_value(value) or "http://api.tushare.pro"
+    api_url = api_url.rstrip("/")
+    if api_url in {"http://tushare.pro", "https://tushare.pro"}:
+        return "http://api.tushare.pro"
+    return api_url
 
 
 def truncate_sensitive_value(value: Optional[str], prefix_len: int = 6, suffix_len: int = 6) -> Optional[str]:

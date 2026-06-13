@@ -185,6 +185,20 @@ def bridge_config_to_env():
             data_source_configs = unified_config.get_data_source_configs()
 
         for ds_config in data_source_configs:
+            try:
+                from app.utils.datasource_sensitive_config import bridge_datasource_credentials_to_env
+
+                bridged_credentials = bridge_datasource_credentials_to_env(
+                    ds_config.type,
+                    ds_config.api_key,
+                    ds_config.endpoint,
+                )
+                if bridged_credentials:
+                    logger.info(f"  ✓ 桥接 {ds_config.type.value} 主凭据配置: {bridged_credentials} 项")
+                    bridged_count += bridged_credentials
+            except Exception as e:
+                logger.warning(f"  ⚠️  桥接数据源主凭据失败: {e}")
+
             if ds_config.enabled and ds_config.api_key:
                 # Tushare Token
                 # 🔥 优先级：数据库配置 > .env 文件（用户在 Web 后台修改后立即生效）

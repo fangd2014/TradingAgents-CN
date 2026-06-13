@@ -89,24 +89,33 @@
       <!-- 连接配置 -->
       <el-divider content-position="left">连接配置</el-divider>
 
-      <el-form-item label="API端点" prop="endpoint">
+      <el-form-item :label="endpointLabel" prop="endpoint">
         <el-input
           v-model="formData.endpoint"
-          placeholder="请输入API端点URL"
+          :placeholder="endpointPlaceholder"
         />
       </el-form-item>
 
       <!-- API Key 输入框 -->
-      <el-form-item label="API Key" prop="api_key">
+      <el-form-item :label="apiCredentialLabel" prop="api_key">
         <el-input
+          v-if="isIwencaiCookieSource"
+          v-model="formData.api_key"
+          type="textarea"
+          :rows="4"
+          :placeholder="apiCredentialPlaceholder"
+          clearable
+        />
+        <el-input
+          v-else
           v-model="formData.api_key"
           type="password"
-          placeholder="输入 API Key（可选，留空则使用环境变量）"
+          :placeholder="apiCredentialPlaceholder"
           show-password
           clearable
         />
         <div class="form-tip">
-          优先级：数据库配置 > 环境变量。留空则使用 .env 文件中的配置
+          {{ apiCredentialTip }}
         </div>
       </el-form-item>
 
@@ -315,6 +324,44 @@ const isTushareSource = computed(() => {
   return (formData.value.type || '').toLowerCase() === 'tushare'
 })
 
+const isIwencaiCookieSource = computed(() => {
+  return ['iwencai', 'ths_hotspot'].includes((formData.value.type || '').toLowerCase())
+})
+
+const endpointLabel = computed(() => {
+  if (isTushareSource.value) return 'TUSHARE_API_URL'
+  if (isIwencaiCookieSource.value) return '访问方式'
+  return 'API端点'
+})
+
+const endpointPlaceholder = computed(() => {
+  if (isTushareSource.value) return 'http://api.tushare.pro'
+  if (isIwencaiCookieSource.value) return 'pywencai://iwencai'
+  return '请输入API端点URL'
+})
+
+const apiCredentialLabel = computed(() => {
+  if (isTushareSource.value) return 'TUSHARE_TOKEN'
+  if (isIwencaiCookieSource.value) return 'IWENCAI_COOKIE'
+  return 'API Key'
+})
+
+const apiCredentialPlaceholder = computed(() => {
+  if (isTushareSource.value) return '输入 TUSHARE_TOKEN（留空则使用环境变量）'
+  if (isIwencaiCookieSource.value) return '登录 i问财网页后复制请求头 Cookie（留空则使用环境变量）'
+  return '输入 API Key（可选，留空则使用环境变量）'
+})
+
+const apiCredentialTip = computed(() => {
+  if (isTushareSource.value) {
+    return '优先级：数据库 TUSHARE_TOKEN > 环境变量 TUSHARE_TOKEN；TUSHARE_API_URL 默认 http://api.tushare.pro'
+  }
+  if (isIwencaiCookieSource.value) {
+    return '标准访问方式：pywencai + 登录 Cookie。优先级：数据库 IWENCAI_COOKIE > 环境变量 IWENCAI_COOKIE'
+  }
+  return '优先级：数据库配置 > 环境变量。留空则使用 .env 文件中的配置'
+})
+
 const visibleConfigParamEntries = computed(() => {
   return paramKeys.value
     .map((key, index) => ({ key, index }))
@@ -338,20 +385,43 @@ const openRegisterUrl = () => {
 const handleTypeChange = () => {
   const selectedType = formData.value.type
   console.log('数据源类型已变更:', selectedType)
-  ensureConfigParams()
 
   // 🔥 自动填充数据源名称（使用数据源类型的值）
   if (selectedType) {
     formData.value.name = selectedType
+    const sourceInfo = dataSourceTypes.find(ds => ds.value === selectedType)
 
     // 如果显示名称为空，也自动填充
     if (!formData.value.display_name) {
-      const sourceInfo = dataSourceTypes.find(ds => ds.value === selectedType)
       if (sourceInfo) {
         formData.value.display_name = sourceInfo.label
       }
     }
+
+    if (sourceInfo?.provider) {
+      formData.value.provider = sourceInfo.provider
+    }
+    if (sourceInfo?.default_endpoint && !formData.value.endpoint) {
+      formData.value.endpoint = sourceInfo.default_endpoint
+    }
+    if (sourceInfo?.description && !formData.value.description) {
+      formData.value.description = sourceInfo.description
+    }
+    if (sourceInfo?.market_categories && formData.value.market_categories.length === 0) {
+      formData.value.market_categories = [...sourceInfo.market_categories]
+    }
+    if (typeof sourceInfo?.priority === 'number') {
+      formData.value.priority = sourceInfo.priority
+    }
+    if (typeof sourceInfo?.rate_limit === 'number') {
+      formData.value.rate_limit = sourceInfo.rate_limit
+    }
+    if (typeof sourceInfo?.timeout === 'number') {
+      formData.value.timeout = sourceInfo.timeout
+    }
   }
+
+  ensureConfigParams()
 }
 
 // 表单数据
@@ -391,13 +461,129 @@ const ensureConfigParams = () => {
  * 注意：这些选项与后端 DataSourceType 枚举保持同步
  * 添加新数据源时，请先在后端 tradingagents/constants/data_sources.py 中注册
  */
-const dataSourceTypes = [
+type DataSourceTypeOption = {
+  label: string
+  value: string
+  register_url?: string
+  register_guide?: string
+  provider?: string
+  default_endpoint?: string
+  description?: string
+  market_categories?: string[]
+  priority?: number
+  rate_limit?: number
+  timeout?: number
+}
+
+const dataSourceTypes: DataSourceTypeOption[] = [
   // 中国市场数据源
   {
     label: 'Tushare',
     value: 'tushare',
+    provider: 'Tushare',
+    default_endpoint: 'http://api.tushare.pro',
+    description: 'Tushare Token 和 API URL 配置，用于低频基础数据、财务数据和兜底能力。',
+    market_categories: ['a_shares'],
+    priority: 10,
+    rate_limit: 120,
+    timeout: 15,
     register_url: 'https://tushare.pro/weborder/#/login?reg=tacn',
     register_guide: '如果您还没有 Tushare 账号，请先注册并获取 Token：'
+  },
+  {
+    label: '行情聚合(Tencent/mootdx)',
+    value: 'external_quotes',
+    provider: 'Tencent Finance + mootdx',
+    default_endpoint: '/api/china-data/quotes',
+    description: 'A股实时行情默认通道，按优先级聚合腾讯财经和 mootdx。',
+    market_categories: ['a_shares'],
+    priority: 100,
+    rate_limit: 600,
+    timeout: 5
+  },
+  {
+    label: '腾讯财经指标',
+    value: 'tencent_finance',
+    provider: 'Tencent Finance',
+    default_endpoint: 'https://qt.gtimg.cn/q=',
+    description: 'PE(TTM)、PB、市值、换手率、涨跌停价等公开行情指标。',
+    market_categories: ['a_shares'],
+    priority: 95,
+    rate_limit: 600,
+    timeout: 5
+  },
+  {
+    label: 'mootdx深行情',
+    value: 'mootdx',
+    provider: 'TongDaXin public servers',
+    description: '通达信TCP协议，提供五档盘口、K线、逐笔成交、finance和F10。',
+    market_categories: ['a_shares'],
+    priority: 90,
+    rate_limit: 300,
+    timeout: 5
+  },
+  {
+    label: '东财研报',
+    value: 'eastmoney_reportapi',
+    provider: 'Eastmoney',
+    default_endpoint: 'https://reportapi.eastmoney.com/report/list',
+    description: '研报列表、三年EPS预测和PDF下载元数据。',
+    market_categories: ['a_shares'],
+    priority: 80,
+    rate_limit: 120,
+    timeout: 8
+  },
+  {
+    label: 'i问财语义搜索',
+    value: 'iwencai',
+    provider: 'iWenCai',
+    default_endpoint: 'pywencai://iwencai',
+    description: '自然语言语义检索，标准访问方式为 pywencai 库加登录 Cookie。',
+    market_categories: ['a_shares'],
+    priority: 70,
+    rate_limit: 60,
+    timeout: 8,
+    register_url: 'https://www.iwencai.com/',
+    register_guide: '登录 i问财网页后，从浏览器请求头复制 Cookie 并填入 IWENCAI_COOKIE：'
+  },
+  {
+    label: '同花顺热点归因',
+    value: 'ths_hotspot',
+    provider: 'THS/iWenCai',
+    default_endpoint: 'pywencai://iwencai',
+    description: '同花顺题材 tags 和热点归因，复用 pywencai 与 IWENCAI_COOKIE。',
+    market_categories: ['a_shares'],
+    priority: 65,
+    rate_limit: 60,
+    timeout: 8,
+    register_url: 'https://www.iwencai.com/',
+    register_guide: '同花顺热点归因复用 i问财登录 Cookie；登录网页后复制请求头 Cookie：'
+  },
+  {
+    label: 'AKShare新闻三件套',
+    value: 'akshare_news',
+    provider: 'AKShare',
+    default_endpoint: 'akshare://stock_news_em,stock_info_global_cls,stock_info_global_em',
+    description: '东财个股新闻、财联社快讯、东财全球资讯，低频调用。',
+    market_categories: ['a_shares'],
+    priority: 55,
+    rate_limit: 60,
+    timeout: 10,
+    register_url: 'https://akshare.akfamily.xyz/',
+    register_guide: 'AKShare 新闻接口无需注册；访问文档了解依赖安装和接口说明：'
+  },
+  {
+    label: '巨潮公告',
+    value: 'cninfo',
+    provider: 'Cninfo via AKShare',
+    default_endpoint: 'akshare://stock_zh_a_disclosure_report_cninfo',
+    description: '沪深北公告全文入口，mootdx F10提供摘要补充。',
+    market_categories: ['a_shares'],
+    priority: 50,
+    rate_limit: 60,
+    timeout: 10,
+    register_url: 'https://www.cninfo.com.cn/',
+    register_guide: '巨潮公告为公开公告源，当前通过 AKShare 封装低频访问：'
   },
   {
     label: 'AKShare',
@@ -617,13 +803,13 @@ const handleSubmit = async () => {
 
     // 添加日志，显示发送的 API Key
     if (payload.api_key) {
-      console.log('🔍 [保存] 发送 API Key:', payload.api_key, '(长度:', payload.api_key.length, ')')
+      console.log('🔍 [保存] 发送 API 凭据 (长度:', payload.api_key.length, ', 是否脱敏值:', payload.api_key.includes('...'), ')')
     } else {
       console.log('🔍 [保存] API Key 为空')
     }
 
     if (payload.api_secret) {
-      console.log('🔍 [保存] 发送 API Secret:', payload.api_secret, '(长度:', payload.api_secret.length, ')')
+      console.log('🔍 [保存] 发送 API Secret (长度:', payload.api_secret.length, ', 是否脱敏值:', payload.api_secret.includes('...'), ')')
     } else {
       console.log('🔍 [保存] API Secret 为空')
     }
@@ -701,13 +887,13 @@ const handleTest = async () => {
 
     // 添加日志，显示发送的 API Key
     if (testPayload.api_key) {
-      console.log('🔍 [测试连接] 发送 API Key:', testPayload.api_key, '(长度:', testPayload.api_key.length, ')')
+      console.log('🔍 [测试连接] 发送 API 凭据 (长度:', testPayload.api_key.length, ', 是否脱敏值:', testPayload.api_key.includes('...'), ')')
     } else {
       console.log('🔍 [测试连接] API Key 为空')
     }
 
     if (testPayload.api_secret) {
-      console.log('🔍 [测试连接] 发送 API Secret:', testPayload.api_secret, '(长度:', testPayload.api_secret.length, ')')
+      console.log('🔍 [测试连接] 发送 API Secret (长度:', testPayload.api_secret.length, ', 是否脱敏值:', testPayload.api_secret.includes('...'), ')')
     } else {
       console.log('🔍 [测试连接] API Secret 为空')
     }

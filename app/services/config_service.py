@@ -1168,7 +1168,11 @@ class ConfigService:
             used_db_credentials = False
             used_env_credentials = False
 
-            logger.info(f"🔍 [TEST] Received API Key from config: {repr(api_key)} (type: {type(api_key).__name__}, length: {len(api_key) if api_key else 0})")
+            logger.info(
+                "🔍 [TEST] Received API credential from config "
+                f"(type: {type(api_key).__name__}, length: {len(api_key) if api_key else 0}, "
+                f"redacted: {bool(api_key and '...' in api_key)})"
+            )
 
             # 根据不同的数据源类型进行测试
             if ds_type == "tushare":
@@ -1189,7 +1193,10 @@ class ConfigService:
                         # 对数据库中的完整 API Key 进行相同的截断处理
                         truncated_db_key = self._truncate_api_key(db_config.api_key)
                         logger.info(f"🔍 [TEST] Database API Key truncated: {truncated_db_key}")
-                        logger.info(f"🔍 [TEST] Received API Key: {api_key}")
+                        logger.info(
+                            "🔍 [TEST] Received redacted API credential "
+                            f"(length: {len(api_key) if api_key else 0})"
+                        )
 
                         # 比较截断后的值
                         if api_key == truncated_db_key:
@@ -1264,7 +1271,7 @@ class ConfigService:
                     # API Key 是完整的，直接使用
                     logger.info(f"✅ [TEST] Using complete API Key from config (length: {len(api_key)})")
 
-                # 测试 Tushare API
+                # 测试 Tushare API。使用原始 HTTP，避免 SDK 在自定义 endpoint 下误判有效 Token。
                 try:
                     test_timeout = getattr(ds_config, "timeout", None) or os.getenv("TUSHARE_TIMEOUT", "30")
                     try:
@@ -1273,19 +1280,35 @@ class ConfigService:
                         test_timeout = 30
                     test_timeout = max(test_timeout, 1)
 
-                    logger.info(f"🔌 [TEST] Calling Tushare API with token (length: {len(api_key)}, timeout: {test_timeout}s)")
-                    import tushare as ts
-                    from tradingagents.config.tushare_endpoint import configure_tushare_api_endpoint
+                    from app.utils.datasource_sensitive_config import normalize_tushare_api_url
 
-                    ts.set_token(api_key)
-                    configure_tushare_api_endpoint()
-                    pro = ts.pro_api(timeout=test_timeout)
-                    api_url = configure_tushare_api_endpoint(pro)
-                    logger.info(f"🔌 [TEST] Tushare API endpoint: {api_url}")
-                    # 获取交易日历（轻量级测试）
-                    df = pro.trade_cal(exchange='SSE', start_date='20240101', end_date='20240101')
+                    api_url = normalize_tushare_api_url(
+                        getattr(ds_config, "endpoint", None)
+                        or os.getenv("TUSHARE_API_URL")
+                        or "http://api.tushare.pro"
+                    )
+                    logger.info(f"🔌 [TEST] Calling Tushare HTTP API endpoint: {api_url}")
 
-                    if df is not None and len(df) > 0:
+                    payload = {
+                        "api_name": "stock_basic",
+                        "token": api_key,
+                        "params": {"ts_code": "001309.SZ"},
+                        "fields": "ts_code,symbol,name",
+                    }
+                    response = requests.post(api_url, json=payload, timeout=test_timeout)
+                    response.raise_for_status()
+                    body = response.json()
+                    if body.get("code") != 0:
+                        message = body.get("msg") or body.get("message") or "Tushare API 返回错误"
+                        return {
+                            "success": False,
+                            "message": f"Tushare API 验证失败: {message}",
+                            "response_time": time.time() - start_time,
+                            "details": {"type": ds_type, "endpoint": api_url, "code": body.get("code")},
+                        }
+
+                    items = ((body.get("data") or {}).get("items") or [])
+                    if items:
                         response_time = time.time() - start_time
                         logger.info(f"✅ [TEST] Tushare API call successful (response time: {response_time:.2f}s)")
 
@@ -1302,7 +1325,8 @@ class ConfigService:
                             "response_time": response_time,
                             "details": {
                                 "type": ds_type,
-                                "test_result": "获取交易日历成功",
+                                "endpoint": api_url,
+                                "test_result": "获取 001309.SZ 基础信息成功",
                                 "credential_source": credential_source,
                                 "used_db_credentials": used_db_credentials,
                                 "used_env_credentials": used_env_credentials
@@ -1314,16 +1338,8 @@ class ConfigService:
                             "success": False,
                             "message": "Tushare API 返回数据为空",
                             "response_time": time.time() - start_time,
-                            "details": None
+                            "details": {"type": ds_type, "endpoint": api_url}
                         }
-                except ImportError:
-                    logger.error(f"❌ [TEST] Tushare library not installed")
-                    return {
-                        "success": False,
-                        "message": "Tushare 库未安装，请运行: pip install tushare",
-                        "response_time": time.time() - start_time,
-                        "details": None
-                    }
                 except Exception as e:
                     logger.error(f"❌ [TEST] Tushare API call failed: {e}")
                     return {
@@ -1428,10 +1444,43 @@ class ConfigService:
                 }
 
             elif ds_type in {"iwencai", "ths_hotspot"}:
-                env_cookie = os.getenv("IWENCAI_COOKIE", "")
-                if api_key or env_cookie:
+                cookie = str(api_key or "").strip()
+                cookie_source = "配置"
+                if (not cookie) or ("..." in cookie):
+                    system_config = await self.get_system_config()
+                    db_config = None
+                    if system_config:
+                        for ds in system_config.data_source_configs:
+                            if ds.name == ds_config.name:
+                                db_config = ds
+                                break
+                    if db_config and db_config.api_key:
+                        truncated_db_key = self._truncate_api_key(db_config.api_key)
+                        if not cookie or cookie == truncated_db_key:
+                            cookie = db_config.api_key
+                            cookie_source = "数据库"
+                        else:
+                            return {
+                                "success": False,
+                                "message": "IWENCAI_COOKIE 格式错误：检测到截断标记但与数据库中的值不匹配，请输入完整 Cookie",
+                                "response_time": time.time() - start_time,
+                                "details": {"type": ds_type, "error": "truncated_cookie_mismatch"},
+                            }
+
+                if not cookie:
+                    env_cookie = os.getenv("IWENCAI_COOKIE", "")
+                    if env_cookie:
+                        cookie = env_cookie.strip()
+                        cookie_source = "环境变量"
+
+                if cookie:
                     try:
-                        import pywencai  # type: ignore
+                        from app.services.china_external_data_service import IwencaiPywencaiClient
+
+                        result = IwencaiPywencaiClient(
+                            cookie=cookie,
+                            timeout_seconds=max(1, min(float(getattr(ds_config, "timeout", 8) or 8), 30)),
+                        ).search("001309 股票简称", limit=1)
                     except ImportError:
                         return {
                             "success": False,
@@ -1439,11 +1488,32 @@ class ConfigService:
                             "response_time": time.time() - start_time,
                             "details": {"type": ds_type, "install": "pip install pywencai"},
                         }
+                    except Exception as e:
+                        return {
+                            "success": False,
+                            "message": f"i问财/同花顺 pywencai 查询异常: {str(e)}",
+                            "response_time": time.time() - start_time,
+                            "details": {"type": ds_type},
+                        }
+
+                    if not result.get("available"):
+                        return {
+                            "success": False,
+                            "message": f"i问财/同花顺 pywencai 查询失败: {result.get('reason') or '返回不可用'}",
+                            "response_time": time.time() - start_time,
+                            "details": {"type": ds_type, "credential_source": cookie_source},
+                        }
+
                     return {
                         "success": True,
-                        "message": "i问财/同花顺 pywencai Cookie 已配置",
+                        "message": "i问财/同花顺 pywencai Cookie 验证成功",
                         "response_time": time.time() - start_time,
-                        "details": {"type": ds_type, "credential_source": "database" if api_key else "environment"},
+                        "details": {
+                            "type": ds_type,
+                            "credential_source": cookie_source,
+                            "test_result": "查询 001309 股票简称成功",
+                            "total_count": result.get("total_count", 0),
+                        },
                     }
                 return {
                     "success": False,
@@ -1590,7 +1660,10 @@ class ConfigService:
                         # 对数据库中的完整 API Key 进行相同的截断处理
                         truncated_db_key = self._truncate_api_key(db_config.api_key)
                         logger.info(f"🔍 [TEST] Database API Key truncated: {truncated_db_key}")
-                        logger.info(f"🔍 [TEST] Received API Key: {api_key}")
+                        logger.info(
+                            "🔍 [TEST] Received redacted API credential "
+                            f"(length: {len(api_key) if api_key else 0})"
+                        )
 
                         # 比较截断后的值
                         if api_key == truncated_db_key:

@@ -270,7 +270,7 @@ class DataSourceConfig(BaseModel):
 
 
 def build_latest_china_data_source_configs(iwencai_cookie: str = "") -> List[DataSourceConfig]:
-    """Seven-module China data source defaults for low-risk A-share data paths."""
+    """China data source defaults for low-risk A-share data paths."""
     iwencai_enabled = bool(str(iwencai_cookie or "").strip())
     return [
         DataSourceConfig(
@@ -310,6 +310,19 @@ def build_latest_china_data_source_configs(iwencai_cookie: str = "") -> List[Dat
             display_name="mootdx深行情",
             provider="TongDaXin public servers",
             description="通达信TCP协议，提供深行情、K线、逐笔、finance和F10。",
+        ),
+        DataSourceConfig(
+            name="tushare",
+            type=DataSourceType.TUSHARE,
+            endpoint="http://api.tushare.pro",
+            timeout=15,
+            rate_limit=120,
+            enabled=False,
+            priority=10,
+            market_categories=["a_shares"],
+            display_name="Tushare凭据",
+            provider="Tushare",
+            description="TUSHARE_TOKEN和TUSHARE_API_URL配置入口，用于低频基础数据、财务数据和兜底能力。",
         ),
         DataSourceConfig(
             name="Eastmoney ReportAPI",

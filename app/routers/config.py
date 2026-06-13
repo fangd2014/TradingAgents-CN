@@ -178,6 +178,24 @@ def _sanitize_database_configs(items):
     except Exception:
         return items
 
+
+def _bridge_datasource_runtime_config(ds_config: DataSourceConfig) -> None:
+    """保存数据源后立即桥接运行时需要的凭据和扩展配置。"""
+    try:
+        from app.utils.datasource_sensitive_config import (
+            bridge_datasource_credentials_to_env,
+            bridge_sensitive_config_params_to_env,
+        )
+
+        bridge_datasource_credentials_to_env(
+            ds_config.type,
+            ds_config.api_key,
+            ds_config.endpoint,
+        )
+        bridge_sensitive_config_params_to_env(ds_config.type, ds_config.config_params)
+    except Exception as e:
+        logger.warning(f"数据源运行时配置桥接失败: {e}")
+
 def _sanitize_kv(d: Dict[str, Any]) -> Dict[str, Any]:
     """对字典中的可能敏感键进行脱敏（仅用于响应）。"""
     try:
@@ -823,12 +841,7 @@ async def add_data_source_config(
 
         success = await config_service.save_system_config(config)
         if success:
-            try:
-                from app.utils.datasource_sensitive_config import bridge_sensitive_config_params_to_env
-
-                bridge_sensitive_config_params_to_env(ds_config.type, ds_config.config_params)
-            except Exception as e:
-                logger.warning(f"数据源敏感扩展配置桥接失败: {e}")
+            _bridge_datasource_runtime_config(ds_config)
 
             # 🆕 自动创建数据源分组关系
             market_categories = _req.get('market_categories', [])
@@ -1200,7 +1213,11 @@ async def update_data_source_config(
                 # 处理 API Key
                 if 'api_key' in _req:
                     api_key = _req.get('api_key')
-                    logger.info(f"🔍 [API Key 验证] 收到的 API Key: {repr(api_key)} (类型: {type(api_key).__name__}, 长度: {len(api_key) if api_key else 0})")
+                    logger.info(
+                        "🔍 [API Key 验证] 收到 API 凭据 "
+                        f"(类型: {type(api_key).__name__}, 长度: {len(api_key) if api_key else 0}, "
+                        f"是否脱敏值: {bool(api_key and '...' in api_key)})"
+                    )
 
                     # 如果是 None 或空字符串，保留原值（不更新）
                     if api_key is None or api_key == '':
@@ -1214,7 +1231,7 @@ async def update_data_source_config(
                         if ds_config.api_key:
                             truncated_db_key = _truncate_api_key(ds_config.api_key)
                             logger.info(f"🔍 [API Key 验证] 数据库原值截断后: {truncated_db_key}")
-                            logger.info(f"🔍 [API Key 验证] 收到的值: {api_key}")
+                            logger.info(f"🔍 [API Key 验证] 收到脱敏值，长度: {len(api_key) if api_key else 0}")
 
                             # 比较截断后的值
                             if api_key == truncated_db_key:
@@ -1241,7 +1258,7 @@ async def update_data_source_config(
                         _req['api_key'] = ds_config.api_key or ""
                     # 如果是新输入的密钥，必须验证有效性
                     elif not is_valid_api_key(api_key):
-                        logger.error(f"❌ [API Key 验证] 验证失败: '{api_key}' (长度: {len(api_key)})")
+                        logger.error(f"❌ [API Key 验证] 验证失败，长度: {len(api_key)}")
                         logger.error(f"   - 长度检查: {len(api_key)} > 10? {len(api_key) > 10}")
                         logger.error(f"   - 占位符前缀检查: startswith('your_')? {api_key.startswith('your_')}, startswith('your-')? {api_key.startswith('your-')}")
                         logger.error(f"   - 占位符后缀检查: endswith('_here')? {api_key.endswith('_here')}, endswith('-here')? {api_key.endswith('-here')}")
@@ -1256,7 +1273,11 @@ async def update_data_source_config(
                 # 处理 API Secret
                 if 'api_secret' in _req:
                     api_secret = _req.get('api_secret')
-                    logger.info(f"🔍 [API Secret 验证] 收到的 API Secret: {repr(api_secret)} (类型: {type(api_secret).__name__}, 长度: {len(api_secret) if api_secret else 0})")
+                    logger.info(
+                        "🔍 [API Secret 验证] 收到 API Secret "
+                        f"(类型: {type(api_secret).__name__}, 长度: {len(api_secret) if api_secret else 0}, "
+                        f"是否脱敏值: {bool(api_secret and '...' in api_secret)})"
+                    )
 
                     # 如果是 None 或空字符串，保留原值（不更新）
                     if api_secret is None or api_secret == '':
@@ -1270,7 +1291,7 @@ async def update_data_source_config(
                         if ds_config.api_secret:
                             truncated_db_secret = _truncate_api_key(ds_config.api_secret)
                             logger.info(f"🔍 [API Secret 验证] 数据库原值截断后: {truncated_db_secret}")
-                            logger.info(f"🔍 [API Secret 验证] 收到的值: {api_secret}")
+                            logger.info(f"🔍 [API Secret 验证] 收到脱敏值，长度: {len(api_secret) if api_secret else 0}")
 
                             # 比较截断后的值
                             if api_secret == truncated_db_secret:
@@ -1297,7 +1318,7 @@ async def update_data_source_config(
                         _req['api_secret'] = ds_config.api_secret or ""
                     # 如果是新输入的密钥，必须验证有效性
                     elif not is_valid_api_key(api_secret):
-                        logger.error(f"❌ [API Secret 验证] 验证失败: '{api_secret}' (长度: {len(api_secret)})")
+                        logger.error(f"❌ [API Secret 验证] 验证失败，长度: {len(api_secret)}")
                         logger.error(f"   - 长度检查: {len(api_secret)} > 10? {len(api_secret) > 10}")
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1311,12 +1332,7 @@ async def update_data_source_config(
 
                 success = await config_service.save_system_config(config)
                 if success:
-                    try:
-                        from app.utils.datasource_sensitive_config import bridge_sensitive_config_params_to_env
-
-                        bridge_sensitive_config_params_to_env(updated_config.type, updated_config.config_params)
-                    except Exception as e:
-                        logger.warning(f"数据源敏感扩展配置桥接失败: {e}")
+                    _bridge_datasource_runtime_config(updated_config)
 
                     # 🆕 同步市场分类关系
                     new_categories = set(_req.get('market_categories', []))
