@@ -17,7 +17,8 @@ from app.core.unified_config import unified_config
 from app.models.config import (
     SystemConfig, LLMConfig, DataSourceConfig, DatabaseConfig,
     ModelProvider, DataSourceType, DatabaseType, LLMProvider,
-    MarketCategory, DataSourceGrouping, ModelCatalog, ModelInfo
+    MarketCategory, DataSourceGrouping, ModelCatalog, ModelInfo,
+    build_latest_china_data_source_configs
 )
 from tradingagents.llm_clients.provider_keys import canonical_aliases, normalize_provider_key
 
@@ -459,30 +460,8 @@ class ConfigService:
                 )
             ],
             default_llm="glm-4",
-            data_source_configs=[
-                DataSourceConfig(
-                    name="AKShare",
-                    type=DataSourceType.AKSHARE,
-                    endpoint="https://akshare.akfamily.xyz",
-                    timeout=30,
-                    rate_limit=100,
-                    enabled=True,
-                    priority=1,
-                    description="AKShare开源金融数据接口"
-                ),
-                DataSourceConfig(
-                    name="Tushare",
-                    type=DataSourceType.TUSHARE,
-                    api_key="your-tushare-token",
-                    endpoint="http://api.tushare.pro",
-                    timeout=30,
-                    rate_limit=200,
-                    enabled=False,
-                    priority=2,
-                    description="Tushare专业金融数据接口"
-                )
-            ],
-            default_data_source="AKShare",
+            data_source_configs=build_latest_china_data_source_configs(),
+            default_data_source="External Quotes",
             database_configs=[
                 DatabaseConfig(
                     name="MongoDB主库",
@@ -1393,6 +1372,102 @@ class ConfigService:
                         "message": f"AKShare API 调用失败: {str(e)}",
                         "response_time": time.time() - start_time,
                         "details": None
+                    }
+
+            elif ds_type in {"external_quotes", "tencent_finance"}:
+                try:
+                    from app.services.china_external_data_service import ChinaQuoteService
+
+                    quotes = ChinaQuoteService().get_quotes(["000001"])
+                    if quotes:
+                        response_time = time.time() - start_time
+                        return {
+                            "success": True,
+                            "message": "成功连接到 external_quotes/Tencent 行情通道",
+                            "response_time": response_time,
+                            "details": {"type": ds_type, "test_result": "获取 000001 快照成功"},
+                        }
+                    return {
+                        "success": False,
+                        "message": "external_quotes/Tencent 行情通道返回空数据",
+                        "response_time": time.time() - start_time,
+                        "details": None,
+                    }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "message": f"external_quotes/Tencent 行情测试失败: {str(e)}",
+                        "response_time": time.time() - start_time,
+                        "details": None,
+                    }
+
+            elif ds_type == "mootdx":
+                try:
+                    import mootdx  # type: ignore
+
+                    return {
+                        "success": True,
+                        "message": "mootdx 已安装，深行情通道可初始化",
+                        "response_time": time.time() - start_time,
+                        "details": {"type": ds_type, "module": getattr(mootdx, "__name__", "mootdx")},
+                    }
+                except ImportError:
+                    return {
+                        "success": False,
+                        "message": "mootdx 未安装；需要深行情时运行: pip install mootdx",
+                        "response_time": time.time() - start_time,
+                        "details": None,
+                    }
+
+            elif ds_type == "eastmoney_reportapi":
+                return {
+                    "success": True,
+                    "message": "东方财富 reportapi 为公开 HTTP 接口，已完成配置",
+                    "response_time": time.time() - start_time,
+                    "details": {"type": ds_type, "endpoint": ds_config.endpoint},
+                }
+
+            elif ds_type in {"iwencai", "ths_hotspot"}:
+                env_cookie = os.getenv("IWENCAI_COOKIE", "")
+                if api_key or env_cookie:
+                    try:
+                        import pywencai  # type: ignore
+                    except ImportError:
+                        return {
+                            "success": False,
+                            "message": "已配置 IWENCAI_COOKIE，但 pywencai 未安装",
+                            "response_time": time.time() - start_time,
+                            "details": {"type": ds_type, "install": "pip install pywencai"},
+                        }
+                    return {
+                        "success": True,
+                        "message": "i问财/同花顺 pywencai Cookie 已配置",
+                        "response_time": time.time() - start_time,
+                        "details": {"type": ds_type, "credential_source": "database" if api_key else "environment"},
+                    }
+                return {
+                    "success": False,
+                    "message": "需要配置 IWENCAI_COOKIE，并安装 pywencai",
+                    "response_time": time.time() - start_time,
+                    "details": {"registration_url": "https://www.iwencai.com/"},
+                }
+
+            elif ds_type in {"akshare_news", "cninfo"}:
+                try:
+                    import akshare  # type: ignore
+
+                    return {
+                        "success": True,
+                        "message": "AKShare 已安装，新闻/巨潮公告低频通道可用",
+                        "response_time": time.time() - start_time,
+                        "details": {"type": ds_type, "module": getattr(akshare, "__name__", "akshare")},
+                    }
+                except ImportError:
+                    return {
+                        "success": False,
+                        "message": "AKShare 未安装；新闻三件套和巨潮公告需要 akshare",
+                        "response_time": time.time() - start_time,
+                        "details": None,
                     }
 
             elif ds_type == "baostock":

@@ -336,6 +336,14 @@ export const DATA_SOURCES = {
   TUSHARE: 'tushare',
   AKSHARE: 'akshare',
   BAOSTOCK: 'baostock',
+  EXTERNAL_QUOTES: 'external_quotes',
+  MOOTDX: 'mootdx',
+  TENCENT_FINANCE: 'tencent_finance',
+  EASTMONEY_REPORTAPI: 'eastmoney_reportapi',
+  IWENCAI: 'iwencai',
+  THS_HOTSPOT: 'ths_hotspot',
+  AKSHARE_NEWS: 'akshare_news',
+  CNINFO: 'cninfo',
 
   // 美股数据源
   FINNHUB: 'finnhub',
@@ -426,6 +434,14 @@ export const formatMarketType = (market: string): string => {
 export const formatDataSource = (source: string): string => {
   const sourceMap: Record<string, string> = {
     finnhub: 'FinnHub',
+    external_quotes: '行情聚合(Tencent/mootdx)',
+    tencent_finance: '腾讯财经',
+    mootdx: 'mootdx',
+    eastmoney_reportapi: '东财研报',
+    iwencai: 'i问财',
+    ths_hotspot: '同花顺热点',
+    akshare_news: 'AKShare新闻',
+    cninfo: '巨潮公告',
     tushare: 'Tushare',
     akshare: 'AKShare',
     yahoo: 'Yahoo Finance'
@@ -483,4 +499,3 @@ export const getStockPlaceholder = (market: string): string => {
   }
   return placeholders[market] ?? '输入股票代码'
 }
-

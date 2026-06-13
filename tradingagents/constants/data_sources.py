@@ -31,6 +31,14 @@ class DataSourceCode(str, Enum):
     TUSHARE = "tushare"      # Tushare - 专业A股数据
     AKSHARE = "akshare"      # AKShare - 开源金融数据（A股+港股）
     BAOSTOCK = "baostock"    # BaoStock - 免费A股数据
+    EXTERNAL_QUOTES = "external_quotes"  # Tencent/mootdx 行情聚合
+    MOOTDX = "mootdx"        # mootdx - 通达信深行情
+    TENCENT_FINANCE = "tencent_finance"  # 腾讯财经行情指标
+    EASTMONEY_REPORTAPI = "eastmoney_reportapi"  # 东方财富研报
+    IWENCAI = "iwencai"      # i问财语义搜索
+    THS_HOTSPOT = "ths_hotspot"  # 同花顺热点归因
+    AKSHARE_NEWS = "akshare_news"  # AKShare新闻三件套
+    CNINFO = "cninfo"        # 巨潮公告
     
     # ==================== 美股数据源 ====================
     YFINANCE = "yfinance"         # yfinance - Yahoo Finance Python库
@@ -130,6 +138,108 @@ DATA_SOURCE_REGISTRY: Dict[str, DataSourceInfo] = {
         official_website="http://baostock.com",
         documentation_url="http://baostock.com/baostock/index.php/Python_API%E6%96%87%E6%A1%A3",
         features=["历史行情", "财务数据", "完全免费", "数据稳定"],
+    ),
+
+    DataSourceCode.EXTERNAL_QUOTES: DataSourceInfo(
+        code=DataSourceCode.EXTERNAL_QUOTES,
+        name="External Quotes",
+        display_name="行情聚合(Tencent/mootdx)",
+        provider="Tencent Finance + mootdx",
+        description="A股实时行情默认低风险通道，聚合腾讯公开行情和mootdx。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        features=["实时价格", "五档盘口", "PE/PB", "市值", "换手率"],
+    ),
+
+    DataSourceCode.MOOTDX: DataSourceInfo(
+        code=DataSourceCode.MOOTDX,
+        name="mootdx",
+        display_name="mootdx深行情",
+        provider="TongDaXin public servers",
+        description="通达信TCP协议，提供深行情、K线、逐笔、finance和F10。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        documentation_url="https://pypi.org/project/mootdx/",
+        features=["深行情", "K线", "逐笔成交", "finance", "F10"],
+    ),
+
+    DataSourceCode.TENCENT_FINANCE: DataSourceInfo(
+        code=DataSourceCode.TENCENT_FINANCE,
+        name="Tencent Finance",
+        display_name="腾讯财经指标",
+        provider="Tencent Finance",
+        description="腾讯公开行情端点，补充PE(TTM)、PB、市值、换手率和涨跌停价。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        features=["实时行情", "PE/PB", "市值", "换手率", "涨跌停价"],
+    ),
+
+    DataSourceCode.EASTMONEY_REPORTAPI: DataSourceInfo(
+        code=DataSourceCode.EASTMONEY_REPORTAPI,
+        name="Eastmoney ReportAPI",
+        display_name="东财研报",
+        provider="Eastmoney",
+        description="东方财富reportapi，提供研报列表、三年EPS预测和PDF下载元数据。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        official_website="https://data.eastmoney.com/report/",
+        features=["研报列表", "EPS预测", "PDF元数据"],
+    ),
+
+    DataSourceCode.IWENCAI: DataSourceInfo(
+        code=DataSourceCode.IWENCAI,
+        name="iWenCai pywencai",
+        display_name="i问财语义搜索",
+        provider="iWenCai",
+        description="自然语言语义搜索，标准做法为pywencai库加登录Cookie。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        official_website="https://www.iwencai.com/",
+        features=["自然语言检索", "跨主题检索", "研报语义搜索"],
+    ),
+
+    DataSourceCode.THS_HOTSPOT: DataSourceInfo(
+        code=DataSourceCode.THS_HOTSPOT,
+        name="THS Hotspot Tags",
+        display_name="同花顺热点归因",
+        provider="THS/iWenCai",
+        description="同花顺题材tags和热点归因，复用pywencai与IWENCAI_COOKIE。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        official_website="https://www.iwencai.com/",
+        features=["题材tags", "热点归因", "强势股"],
+    ),
+
+    DataSourceCode.AKSHARE_NEWS: DataSourceInfo(
+        code=DataSourceCode.AKSHARE_NEWS,
+        name="AKShare News Trio",
+        display_name="AKShare新闻三件套",
+        provider="AKShare",
+        description="低频使用AKShare获取东财个股新闻、财联社快讯和东财全球资讯。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        official_website="https://akshare.akfamily.xyz",
+        features=["个股新闻", "财联社快讯", "全球资讯"],
+    ),
+
+    DataSourceCode.CNINFO: DataSourceInfo(
+        code=DataSourceCode.CNINFO,
+        name="Cninfo Announcements",
+        display_name="巨潮公告",
+        provider="Cninfo via AKShare",
+        description="巨潮公告全文入口，mootdx F10提供摘要补充。",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        official_website="https://www.cninfo.com.cn/",
+        features=["公告全文", "公告摘要", "沪深北公告"],
     ),
     
     # yfinance
@@ -342,4 +452,3 @@ def is_data_source_supported(code: str) -> bool:
         是否支持
     """
     return code in DATA_SOURCE_REGISTRY
-

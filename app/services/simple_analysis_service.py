@@ -37,7 +37,14 @@ from app.services.progress_log_handler import register_analysis_tracker, unregis
 
 # 股票基础信息获取（用于补充显示名称）
 try:
-    from tradingagents.dataflows.data_source_manager import get_data_source_manager
+    from tradingagents.dataflows.data_source_manager import get_data_source_manager, require_latest_external_quote
+except Exception:
+    get_data_source_manager = None  # type: ignore
+    require_latest_external_quote = None  # type: ignore
+
+try:
+    if get_data_source_manager is None:
+        raise RuntimeError("data source manager unavailable")
     _data_source_manager = get_data_source_manager()
     def _get_stock_info_safe(stock_code: str):
         """获取股票基础信息的安全封装"""
@@ -161,6 +168,14 @@ def _analysis_market_to_api_market(market_type: Optional[str]) -> str:
     if market in {"美股", "US", "us"}:
         return "US"
     return "CN"
+
+
+def _require_latest_quote_for_analysis(stock_code: str, market_type: Optional[str]) -> None:
+    if _analysis_market_to_api_market(market_type) != "CN":
+        return
+    if require_latest_external_quote is None:
+        raise RuntimeError("无法获取A股最新行情数据，已中断生成分析报告。失败原因: 实时行情校验模块不可用。")
+    require_latest_external_quote(stock_code, context="生成分析报告")
 
 
 def _looks_like_stock_code(value: str, market_type: Optional[str] = None) -> bool:
@@ -1614,6 +1629,8 @@ class SimpleAnalysisService:
             # 获取市场类型
             market_type = request.parameters.market_type if request.parameters else "A股"
             logger.info(f"📊 [市场类型] 使用市场类型: {market_type}")
+            _require_latest_quote_for_analysis(request.stock_code, market_type)
+            logger.info(f"✅ [实时行情前置校验] 最新行情可用: {request.stock_code}")
 
             # 创建分析配置（支持混合模式）
             config = create_analysis_config(

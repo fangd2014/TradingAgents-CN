@@ -220,7 +220,7 @@ class Settings(BaseSettings):
     # 实时行情接口轮换配置
     QUOTES_ROTATION_ENABLED: bool = Field(
         default=True,
-        description="启用接口轮换机制（Tushare → AKShare东方财富 → AKShare新浪财经）"
+        description="启用行情采集通道轮换；A股默认仅使用 external_quotes (Tencent/mootdx)"
     )
     QUOTES_TUSHARE_HOURLY_LIMIT: int = Field(
         default=2,
@@ -273,6 +273,22 @@ class Settings(BaseSettings):
     AKSHARE_INIT_HISTORICAL_DAYS: int = Field(default=365, ge=1, le=3650, description="初始化历史数据天数")
     AKSHARE_INIT_BATCH_SIZE: int = Field(default=100, ge=10, le=1000, description="初始化批处理大小")
     AKSHARE_INIT_AUTO_START: bool = Field(default=False, description="应用启动时自动检查并初始化数据")
+
+    # ==================== 中国外部数据源增强配置 ====================
+
+    MOOTDX_ENABLED: bool = Field(default=True, description="启用mootdx通达信行情增强")
+    MOOTDX_DEEP_MARKET_ENABLED: bool = Field(default=True, description="启用mootdx深行情/K线/逐笔/F10/finance")
+    TENCENT_FINANCE_ENABLED: bool = Field(default=True, description="启用腾讯财经行情增强")
+    TENCENT_FINANCE_METRICS_ENABLED: bool = Field(default=True, description="启用腾讯财经PE/PB/市值/换手等指标")
+    EASTMONEY_RESEARCH_ENABLED: bool = Field(default=True, description="启用东方财富/AKShare研报数据")
+    EASTMONEY_REPORTAPI_ENABLED: bool = Field(default=True, description="启用东方财富reportapi研报直连")
+    IWENCAI_ENABLED: bool = Field(default=True, description="启用i问财语义搜索")
+    IWENCAI_COOKIE: str = Field(default="", description="i问财/同花顺登录Cookie，用于pywencai语义搜索和题材tags")
+    THS_TAGS_ENABLED: bool = Field(default=True, description="启用同花顺题材tags增强")
+    THS_HOTSPOT_ENABLED: bool = Field(default=True, description="启用同花顺热点归因")
+    AKSHARE_NEWS_ENABLED: bool = Field(default=True, description="启用AKShare新闻三件套")
+    CNINFO_ANNOUNCEMENTS_ENABLED: bool = Field(default=True, description="启用巨潮公告")
+    CHINA_DATA_HTTP_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=30, description="中国外部数据源HTTP超时秒数")
 
     # ==================== 分析师数据获取配置 ====================
 

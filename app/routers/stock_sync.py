@@ -3,7 +3,7 @@
 支持单个股票或批量股票的历史数据和财务数据同步
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 import uuid
@@ -23,6 +23,35 @@ from datetime import datetime, timedelta
 logger = logging.getLogger("webapi")
 
 router = APIRouter(prefix="/api/stock-sync", tags=["股票数据同步"])
+
+AUTO_REALTIME_SOURCES = ["external_quotes"]
+AUTO_HISTORICAL_SOURCES = ["mootdx", "tushare", "akshare"]
+AUTO_FINANCIAL_SOURCES = ["mootdx", "tushare", "akshare"]
+AUTO_BASIC_SOURCES = ["mootdx_tencent", "tushare", "akshare"]
+
+
+def _source_plan(requested_source: str, priority: List[str]) -> List[str]:
+    requested = str(requested_source or "auto").strip().lower()
+    if requested in {"auto", "latest", "latest_sources", "external_quotes"}:
+        return list(priority)
+    return [requested]
+
+
+def _first_value(row: Dict[str, Any], keys: List[str]) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(str(value).replace(",", ""))
+    except Exception:
+        return None
 
 
 def _is_china_etf_code(symbol: str) -> bool:
@@ -161,6 +190,159 @@ async def _sync_latest_to_market_quotes(symbol: str) -> None:
     )
 
 
+async def _sync_external_quote_to_market_quotes(symbol: str) -> Dict[str, Any]:
+    from app.services.quotes_service import get_quotes_service
+
+    db = get_mongo_db()
+    symbol6 = str(symbol).zfill(6)
+    quote = (await get_quotes_service().get_quotes([symbol6])).get(symbol6)
+    if not quote:
+        return {"success": False, "error": "external_quotes 未返回实时行情"}
+
+    quote_doc = {
+        "code": symbol6,
+        "symbol": symbol6,
+        "name": quote.get("name"),
+        "market": "A股ETF" if _is_china_etf_code(symbol6) else "A股",
+        "instrument_type": "etf" if _is_china_etf_code(symbol6) else "stock",
+        "close": quote.get("close"),
+        "price": quote.get("close"),
+        "current_price": quote.get("close"),
+        "pct_chg": quote.get("pct_chg"),
+        "change_percent": quote.get("pct_chg"),
+        "amount": quote.get("amount"),
+        "volume": quote.get("volume"),
+        "open": quote.get("open"),
+        "high": quote.get("high"),
+        "low": quote.get("low"),
+        "pre_close": quote.get("pre_close"),
+        "source": quote.get("source") or "external_quotes",
+        "data_source": quote.get("source") or "external_quotes",
+        "updated_at": datetime.utcnow(),
+    }
+    for field in ("pe_ttm", "pb", "total_mv", "float_mv", "turnover_rate", "limit_up", "limit_down"):
+        if quote.get(field) is not None:
+            quote_doc[field] = quote.get(field)
+
+    await db.market_quotes.update_one(
+        {"code": symbol6},
+        {"$set": quote_doc},
+        upsert=True,
+    )
+    return {"success": True, "quote": quote_doc, "records": 1}
+
+
+async def _sync_mootdx_historical_to_db(symbol: str, days: int) -> Dict[str, Any]:
+    from app.services.china_external_data_service import MootdxDeepMarketService
+
+    db = get_mongo_db()
+    symbol6 = str(symbol).zfill(6)
+    limit = max(1, min(int(days or 30), 1000))
+    rows = await asyncio.to_thread(MootdxDeepMarketService().get_kline, symbol6, "day", limit)
+    if not rows:
+        return {"success": False, "error": "mootdx 未返回K线数据", "records": 0}
+
+    saved = 0
+    for row in rows:
+        raw_date = _first_value(row, ["datetime", "date", "trade_date", "time"])
+        trade_date = str(raw_date or "").split(" ")[0]
+        if not trade_date:
+            continue
+        doc = {
+            "symbol": symbol6,
+            "code": symbol6,
+            "trade_date": trade_date,
+            "period": "daily",
+            "open": _safe_float(_first_value(row, ["open", "开盘"])),
+            "high": _safe_float(_first_value(row, ["high", "最高"])),
+            "low": _safe_float(_first_value(row, ["low", "最低"])),
+            "close": _safe_float(_first_value(row, ["close", "收盘", "price"])),
+            "volume": _safe_float(_first_value(row, ["volume", "vol", "成交量"])),
+            "amount": _safe_float(_first_value(row, ["amount", "成交额"])),
+            "data_source": "mootdx",
+            "source": "mootdx",
+            "updated_at": datetime.utcnow(),
+            "raw_data": row,
+        }
+        await db.stock_daily_quotes.update_one(
+            {"symbol": symbol6, "trade_date": trade_date, "period": "daily", "data_source": "mootdx"},
+            {"$set": doc},
+            upsert=True,
+        )
+        saved += 1
+
+    return {"success": saved > 0, "records": saved, "message": f"mootdx同步了 {saved} 条K线"}
+
+
+async def _sync_mootdx_financial_to_db(symbol: str) -> Dict[str, Any]:
+    from app.services.china_external_data_service import MootdxDeepMarketService
+
+    db = get_mongo_db()
+    symbol6 = str(symbol).zfill(6)
+    snapshot = await asyncio.to_thread(MootdxDeepMarketService().get_finance_snapshot, symbol6)
+    if not snapshot:
+        return {"success": False, "error": "mootdx 未返回财务快照"}
+
+    report_period = str(_first_value(snapshot, ["report_period", "报告期", "date", "datetime"]) or datetime.utcnow().strftime("%Y%m%d"))
+    doc = {
+        "symbol": symbol6,
+        "code": symbol6,
+        "market": "A股",
+        "data_source": "mootdx",
+        "source": "mootdx",
+        "report_period": report_period,
+        "report_type": "snapshot",
+        "raw_data": snapshot,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    for key, value in snapshot.items():
+        if isinstance(key, str) and key not in doc:
+            doc[key] = value
+
+    await db.stock_financial_data.update_one(
+        {"symbol": symbol6, "data_source": "mootdx", "report_period": report_period, "report_type": "snapshot"},
+        {"$set": doc},
+        upsert=True,
+    )
+    return {"success": True, "records": 1, "message": "mootdx财务快照同步成功"}
+
+
+async def _sync_latest_basic_to_db(symbol: str) -> Dict[str, Any]:
+    from app.services.china_external_data_service import ChinaQuoteService, MootdxDeepMarketService
+
+    db = get_mongo_db()
+    symbol6 = str(symbol).zfill(6)
+    quote = await asyncio.to_thread(ChinaQuoteService().get_quotes, [symbol6])
+    quote_data = quote.get(symbol6) if isinstance(quote, dict) else {}
+    finance = await asyncio.to_thread(MootdxDeepMarketService().get_finance_snapshot, symbol6)
+    if not quote_data and not finance:
+        return {"success": False, "error": "mootdx/腾讯未返回基础或指标数据"}
+
+    doc = {
+        "code": symbol6,
+        "symbol": symbol6,
+        "name": (quote_data or {}).get("name"),
+        "source": "mootdx_tencent",
+        "data_source": "mootdx_tencent",
+        "sse": "上海证券交易所" if symbol6.startswith(("60", "68", "90")) else "深圳证券交易所",
+        "market": "ETF" if _is_china_etf_code(symbol6) else "-",
+        "updated_at": datetime.utcnow(),
+    }
+    for field in ("pe_ttm", "pb", "total_mv", "float_mv", "turnover_rate", "limit_up", "limit_down"):
+        if (quote_data or {}).get(field) is not None:
+            doc[field] = quote_data.get(field)
+    if finance:
+        doc["finance_snapshot"] = finance
+
+    await db.stock_basic_info.update_one(
+        {"code": symbol6, "source": "mootdx_tencent"},
+        {"$set": doc},
+        upsert=True,
+    )
+    return {"success": True, "records": 1, "message": "mootdx/腾讯基础信息同步成功"}
+
+
 class SingleStockSyncRequest(BaseModel):
     """单股票同步请求"""
     symbol: str = Field(..., description="股票代码（6位）")
@@ -168,7 +350,7 @@ class SingleStockSyncRequest(BaseModel):
     sync_historical: bool = Field(True, description="是否同步历史数据")
     sync_financial: bool = Field(True, description="是否同步财务数据")
     sync_basic: bool = Field(False, description="是否同步基础数据")
-    data_source: str = Field("tushare", description="数据源: tushare/akshare")
+    data_source: str = Field("auto", description="数据源: auto按优先级尝试，或指定 tushare/akshare/mootdx")
     days: int = Field(30, description="历史数据天数", ge=1, le=3650)
 
 
@@ -178,7 +360,7 @@ class BatchStockSyncRequest(BaseModel):
     sync_historical: bool = Field(True, description="是否同步历史数据")
     sync_financial: bool = Field(True, description="是否同步财务数据")
     sync_basic: bool = Field(False, description="是否同步基础数据")
-    data_source: str = Field("tushare", description="数据源: tushare/akshare")
+    data_source: str = Field("auto", description="数据源: auto按优先级尝试，或指定 tushare/akshare/mootdx")
     days: int = Field(30, description="历史数据天数", ge=1, le=3650)
 
 
@@ -235,109 +417,33 @@ async def sync_single_stock(
         # 同步实时行情
         if request.sync_realtime:
             try:
-                if is_china_etf:
-                    etf_sync = await _sync_etf_latest_to_market_quotes(request.symbol)
-                    result["realtime_sync"] = {
-                        "success": etf_sync.get("success", False),
-                        "message": "ETF实时行情同步成功" if etf_sync.get("success") else "ETF实时行情同步失败",
-                        "data_source_used": "akshare_etf",
-                        "market_quote_available": etf_sync.get("success", False),
-                        "market_quote_snapshot": etf_sync.get("quote"),
-                        "error": etf_sync.get("error"),
-                    }
-                    logger.info(f"✅ {request.symbol} ETF实时行情同步完成: {etf_sync.get('success', False)}")
-                else:
-                    realtime_debug = {
-                        "requested_data_source": request.data_source,
-                        "data_source_used": None,
-                        "attempted_sources": [],
-                        "primary_stats": None,
-                        "fallback_stats": None,
-                        "primary_error": None,
-                        "fallback_error": None
-                    }
+                attempted_sources = []
+                realtime_result = None
+                for source in _source_plan(request.data_source, AUTO_REALTIME_SOURCES):
+                    attempted_sources.append(source)
+                    if source != "external_quotes":
+                        realtime_result = {"success": False, "error": f"实时行情不支持数据源 {source}"}
+                        continue
+                    realtime_result = await _sync_external_quote_to_market_quotes(request.symbol)
+                    if realtime_result.get("success"):
+                        break
 
-                    # 🔥 单个股票实时行情同步：优先使用 AKShare（避免 Tushare 接口限制）
-                    actual_data_source = request.data_source
-                    if request.data_source == "tushare":
-                        logger.info(f"💡 单个股票实时行情同步，自动切换到 AKShare 数据源（避免 Tushare 接口限制）")
-                        actual_data_source = "akshare"
-                    realtime_debug["data_source_used"] = actual_data_source
-                    realtime_debug["attempted_sources"].append(actual_data_source)
-
-                    if actual_data_source == "tushare":
-                        service = await get_tushare_sync_service()
-                    elif actual_data_source == "akshare":
-                        service = await get_akshare_sync_service()
-                    else:
-                        raise ValueError(f"不支持的数据源: {actual_data_source}")
-
-                    # 同步实时行情（只同步指定的股票）
-                    realtime_result = await service.sync_realtime_quotes(
-                        symbols=[request.symbol],
-                        force=True  # 强制执行，跳过交易时间检查
-                    )
-                    realtime_debug["primary_stats"] = realtime_result
-                    if realtime_result.get("errors"):
-                        realtime_debug["primary_error"] = realtime_result["errors"][0]
-
-                    # 🔥 如果 AKShare 同步失败，回退到 Tushare 全量同步
-                    if actual_data_source == "akshare" and realtime_result.get("success_count", 0) == 0:
-                        logger.warning(f"⚠️ AKShare 同步失败，回退到 Tushare 全量同步")
-                        logger.info(f"💡 Tushare 只支持全量同步，将同步所有股票的实时行情")
-                        realtime_debug["attempted_sources"].append("tushare")
-
-                        tushare_service = await get_tushare_sync_service()
-                        if tushare_service:
-                            # 使用 Tushare 全量同步（不指定 symbols，同步所有股票）
-                            fallback_result = await tushare_service.sync_realtime_quotes(
-                                symbols=None,  # 全量同步
-                                force=True
-                            )
-                            realtime_debug["fallback_stats"] = fallback_result
-                            if fallback_result.get("errors"):
-                                realtime_debug["fallback_error"] = fallback_result["errors"][0]
-                            realtime_result = fallback_result
-                            logger.info(f"✅ Tushare 全量同步完成: 成功 {realtime_result.get('success_count', 0)} 只")
-                        else:
-                            logger.error(f"❌ Tushare 服务不可用，无法回退")
-                            realtime_result["fallback_failed"] = True
-                            realtime_debug["fallback_error"] = {"error": "Tushare 服务不可用，无法回退", "context": "fallback_unavailable"}
-
-                    success = realtime_result.get("success_count", 0) > 0
-
-                    # 🔥 如果切换了数据源，在消息中说明
-                    message = f"实时行情同步{'成功' if success else '失败'}"
-                    if request.data_source == "tushare" and actual_data_source == "akshare":
-                        message += "（已自动切换到 AKShare 数据源）"
-
-                    db = get_mongo_db()
-                    latest_quote = await db.market_quotes.find_one(
-                        {"code": str(request.symbol).zfill(6)},
-                        {"_id": 0, "code": 1, "trade_date": 1, "updated_at": 1, "close": 1}
-                    )
-
-                    result["realtime_sync"] = {
-                        "success": success,
-                        "message": message,
-                        "data_source_used": actual_data_source,  # 🔥 返回实际使用的数据源
-                        "attempted_sources": realtime_debug["attempted_sources"],
-                        "primary_error": realtime_debug["primary_error"],
-                        "fallback_error": realtime_debug["fallback_error"],
-                        "market_quote_available": latest_quote is not None,
-                        "market_quote_snapshot": latest_quote
-                    }
-                    logger.info(f"✅ {request.symbol} 实时行情同步完成: {success}")
-                    logger.info(
-                        "📋 %s 实时行情同步详情: requested=%s, used=%s, attempted=%s, primary_error=%s, fallback_error=%s, market_quote_available=%s",
-                        request.symbol,
-                        request.data_source,
-                        actual_data_source,
-                        realtime_debug["attempted_sources"],
-                        realtime_debug["primary_error"],
-                        realtime_debug["fallback_error"],
-                        latest_quote is not None,
-                    )
+                db = get_mongo_db()
+                latest_quote = await db.market_quotes.find_one(
+                    {"code": str(request.symbol).zfill(6)},
+                    {"_id": 0, "code": 1, "trade_date": 1, "updated_at": 1, "close": 1, "data_source": 1, "source": 1}
+                )
+                success = bool(realtime_result and realtime_result.get("success"))
+                result["realtime_sync"] = {
+                    "success": success,
+                    "message": f"实时行情同步{'成功' if success else '失败'}",
+                    "data_source_used": "external_quotes" if success else None,
+                    "attempted_sources": attempted_sources,
+                    "market_quote_available": latest_quote is not None,
+                    "market_quote_snapshot": latest_quote,
+                    "error": None if success else (realtime_result or {}).get("error"),
+                }
+                logger.info(f"✅ {request.symbol} 实时行情同步完成: {success}, attempted={attempted_sources}")
 
             except Exception as e:
                 logger.error(f"❌ {request.symbol} 实时行情同步失败: {e}")
@@ -349,34 +455,60 @@ async def sync_single_stock(
         # 同步历史数据
         if request.sync_historical and not is_china_etf:
             try:
-                if request.data_source == "tushare":
-                    service = await get_tushare_sync_service()
-                elif request.data_source == "akshare":
-                    service = await get_akshare_sync_service()
-                else:
-                    raise ValueError(f"不支持的数据源: {request.data_source}")
-
-                # 计算日期范围
+                attempted_sources = []
+                errors = {}
+                hist_result = None
+                data_source_used = None
                 end_date = datetime.now().strftime('%Y-%m-%d')
                 start_date = (datetime.now() - timedelta(days=request.days)).strftime('%Y-%m-%d')
 
-                # 同步历史数据
-                hist_result = await service.sync_historical_data(
-                    symbols=[request.symbol],
-                    start_date=start_date,
-                    end_date=end_date,
-                    incremental=False
-                )
+                for source in _source_plan(request.data_source, AUTO_HISTORICAL_SOURCES):
+                    attempted_sources.append(source)
+                    try:
+                        if source == "mootdx":
+                            candidate = await _sync_mootdx_historical_to_db(request.symbol, request.days)
+                            if candidate.get("success"):
+                                hist_result = {"success_count": 1, "total_records": candidate.get("records", 0)}
+                                data_source_used = source
+                                break
+                            errors[source] = candidate.get("error") or "mootdx返回空数据"
+                            continue
 
+                        if source == "tushare":
+                            service = await get_tushare_sync_service()
+                        elif source == "akshare":
+                            service = await get_akshare_sync_service()
+                        else:
+                            errors[source] = f"不支持的数据源: {source}"
+                            continue
+
+                        candidate = await service.sync_historical_data(
+                            symbols=[request.symbol],
+                            start_date=start_date,
+                            end_date=end_date,
+                            incremental=False
+                        )
+                        if candidate.get("success_count", 0) > 0:
+                            hist_result = candidate
+                            data_source_used = source
+                            break
+                        errors[source] = candidate.get("error") or candidate.get("errors") or "未同步到历史数据"
+                    except Exception as source_exc:
+                        errors[source] = str(source_exc)
+
+                success = bool(hist_result and hist_result.get("success_count", 0) > 0)
                 result["historical_sync"] = {
-                    "success": hist_result.get("success_count", 0) > 0,
-                    "records": hist_result.get("total_records", 0),
-                    "message": f"同步了 {hist_result.get('total_records', 0)} 条历史记录"
+                    "success": success,
+                    "records": (hist_result or {}).get("total_records", 0),
+                    "message": f"同步了 {(hist_result or {}).get('total_records', 0)} 条历史记录" if success else "历史数据同步失败",
+                    "data_source_used": data_source_used,
+                    "attempted_sources": attempted_sources,
+                    "errors": errors,
                 }
-                logger.info(f"✅ {request.symbol} 历史数据同步完成: {hist_result.get('total_records', 0)} 条记录")
+                logger.info(f"✅ {request.symbol} 历史数据同步完成: {result['historical_sync']}")
 
                 # 🔥 同步最新历史数据到 market_quotes
-                if hist_result.get("success_count", 0) > 0:
+                if success:
                     try:
                         await _sync_latest_to_market_quotes(request.symbol)
                         logger.info(f"✅ {request.symbol} 最新数据已同步到 market_quotes")
@@ -413,20 +545,48 @@ async def sync_single_stock(
         # 同步财务数据
         if request.sync_financial and not is_china_etf:
             try:
-                financial_service = await get_financial_sync_service()
-                
-                # 同步财务数据
-                fin_result = await financial_service.sync_single_stock(
-                    symbol=request.symbol,
-                    data_sources=[request.data_source]
-                )
-                
-                success = fin_result.get(request.data_source, False)
+                attempted_sources = []
+                errors = {}
+                success = False
+                data_source_used = None
+
+                for source in _source_plan(request.data_source, AUTO_FINANCIAL_SOURCES):
+                    attempted_sources.append(source)
+                    try:
+                        if source == "mootdx":
+                            candidate = await _sync_mootdx_financial_to_db(request.symbol)
+                            if candidate.get("success"):
+                                success = True
+                                data_source_used = source
+                                break
+                            errors[source] = candidate.get("error") or "mootdx未返回财务快照"
+                            continue
+
+                        if source not in {"tushare", "akshare"}:
+                            errors[source] = f"不支持的数据源: {source}"
+                            continue
+
+                        financial_service = await get_financial_sync_service()
+                        candidate = await financial_service.sync_single_stock(
+                            symbol=request.symbol,
+                            data_sources=[source]
+                        )
+                        if candidate.get(source, False):
+                            success = True
+                            data_source_used = source
+                            break
+                        errors[source] = candidate.get("error") or "财务同步未成功"
+                    except Exception as source_exc:
+                        errors[source] = str(source_exc)
+
                 result["financial_sync"] = {
                     "success": success,
-                    "message": "财务数据同步成功" if success else "财务数据同步失败"
+                    "message": "财务数据同步成功" if success else "财务数据同步失败",
+                    "data_source_used": data_source_used,
+                    "attempted_sources": attempted_sources,
+                    "errors": errors,
                 }
-                logger.info(f"✅ {request.symbol} 财务数据同步完成: {success}")
+                logger.info(f"✅ {request.symbol} 财务数据同步完成: {result['financial_sync']}")
                 
             except Exception as e:
                 logger.error(f"❌ {request.symbol} 财务数据同步失败: {e}")
@@ -440,7 +600,39 @@ async def sync_single_stock(
             try:
                 # 🔥 同步单个股票的基础数据
                 # 参考 basics_sync_service 的实现逻辑
-                if request.data_source == "tushare":
+                if str(request.data_source or "auto").lower() in {"auto", "latest", "latest_sources", "external_quotes"}:
+                    attempted_sources = []
+                    errors = {}
+                    success = False
+                    data_source_used = None
+
+                    for source in AUTO_BASIC_SOURCES:
+                        attempted_sources.append(source)
+                        try:
+                            if source == "mootdx_tencent":
+                                candidate = await _sync_latest_basic_to_db(request.symbol)
+                                if candidate.get("success"):
+                                    success = True
+                                    data_source_used = source
+                                    break
+                                errors[source] = candidate.get("error") or "mootdx/腾讯未返回基础数据"
+                                continue
+
+                            # 旧同步分支很重，auto 模式下只作为显式错误提示，不自动全量抓取。
+                            errors[source] = "低优先级旧基础源未在auto模式自动触发"
+                        except Exception as source_exc:
+                            errors[source] = str(source_exc)
+
+                    result["basic_sync"] = {
+                        "success": success,
+                        "message": "基础数据同步成功" if success else "基础数据同步失败",
+                        "data_source_used": data_source_used,
+                        "attempted_sources": attempted_sources,
+                        "errors": errors,
+                    }
+                    logger.info(f"✅ {request.symbol} 基础数据同步完成: {result['basic_sync']}")
+
+                elif request.data_source == "tushare":
                     from app.services.basics_sync import (
                         fetch_stock_basic_df,
                         find_latest_trade_date,
@@ -644,10 +836,10 @@ async def sync_single_stock(
 
         # 判断整体是否成功
         overall_success = (
-            (not request.sync_realtime or result["realtime_sync"].get("success", False)) and
-            (not request.sync_historical or result["historical_sync"].get("success", False)) and
-            (not request.sync_financial or result["financial_sync"].get("success", False)) and
-            (not request.sync_basic or result["basic_sync"].get("success", False))
+            (not request.sync_realtime or bool(result["realtime_sync"] and result["realtime_sync"].get("success", False))) and
+            (not request.sync_historical or bool(result["historical_sync"] and result["historical_sync"].get("success", False))) and
+            (not request.sync_financial or bool(result["financial_sync"] and result["financial_sync"].get("success", False))) and
+            (not request.sync_basic or bool(result["basic_sync"] and result["basic_sync"].get("success", False)))
         )
 
         # 添加整体成功标志到结果中
@@ -694,32 +886,75 @@ async def sync_batch_stocks(
         # 同步历史数据
         if request.sync_historical:
             try:
-                if request.data_source == "tushare":
-                    service = await get_tushare_sync_service()
-                elif request.data_source == "akshare":
-                    service = await get_akshare_sync_service()
-                else:
-                    raise ValueError(f"不支持的数据源: {request.data_source}")
-
-                # 计算日期范围
+                attempted_sources = []
+                errors = {}
+                source_results = {}
+                remaining_symbols = [str(symbol).zfill(6) for symbol in request.symbols]
+                total_records = 0
+                success_symbols = set()
                 end_date = datetime.now().strftime('%Y-%m-%d')
                 start_date = (datetime.now() - timedelta(days=request.days)).strftime('%Y-%m-%d')
-                
-                # 批量同步历史数据
-                hist_result = await service.sync_historical_data(
-                    symbols=request.symbols,
-                    start_date=start_date,
-                    end_date=end_date,
-                    incremental=False
-                )
+
+                for source in _source_plan(request.data_source, AUTO_HISTORICAL_SOURCES):
+                    if not remaining_symbols:
+                        break
+                    attempted_sources.append(source)
+                    try:
+                        if source == "mootdx":
+                            source_success = 0
+                            source_records = 0
+                            still_remaining = []
+                            for symbol in remaining_symbols:
+                                candidate = await _sync_mootdx_historical_to_db(symbol, request.days)
+                                if candidate.get("success"):
+                                    source_success += 1
+                                    source_records += candidate.get("records", 0)
+                                    success_symbols.add(symbol)
+                                else:
+                                    still_remaining.append(symbol)
+                            remaining_symbols = still_remaining
+                            total_records += source_records
+                            source_results[source] = {"success_count": source_success, "total_records": source_records}
+                            continue
+
+                        if source == "tushare":
+                            service = await get_tushare_sync_service()
+                        elif source == "akshare":
+                            service = await get_akshare_sync_service()
+                        else:
+                            errors[source] = f"不支持的数据源: {source}"
+                            continue
+
+                        candidate = await service.sync_historical_data(
+                            symbols=remaining_symbols,
+                            start_date=start_date,
+                            end_date=end_date,
+                            incremental=False
+                        )
+                        source_success = candidate.get("success_count", 0)
+                        total_records += candidate.get("total_records", 0)
+                        source_results[source] = candidate
+                        if source_success > 0:
+                            success_symbols.update(remaining_symbols[:source_success])
+                            if source_success >= len(remaining_symbols):
+                                remaining_symbols = []
+                            else:
+                                remaining_symbols = remaining_symbols[source_success:]
+                        else:
+                            errors[source] = candidate.get("error") or candidate.get("errors") or "未同步到历史数据"
+                    except Exception as source_exc:
+                        errors[source] = str(source_exc)
                 
                 result["historical_sync"] = {
-                    "success_count": hist_result.get("success_count", 0),
-                    "error_count": hist_result.get("error_count", 0),
-                    "total_records": hist_result.get("total_records", 0),
-                    "message": f"成功同步 {hist_result.get('success_count', 0)}/{len(request.symbols)} 只股票，共 {hist_result.get('total_records', 0)} 条记录"
+                    "success_count": len(success_symbols),
+                    "error_count": len(request.symbols) - len(success_symbols),
+                    "total_records": total_records,
+                    "attempted_sources": attempted_sources,
+                    "source_results": source_results,
+                    "errors": errors,
+                    "message": f"成功同步 {len(success_symbols)}/{len(request.symbols)} 只股票，共 {total_records} 条记录"
                 }
-                logger.info(f"✅ 批量历史数据同步完成: {hist_result.get('success_count', 0)}/{len(request.symbols)}")
+                logger.info(f"✅ 批量历史数据同步完成: {result['historical_sync']}")
                 
             except Exception as e:
                 logger.error(f"❌ 批量历史数据同步失败: {e}")
@@ -732,30 +967,66 @@ async def sync_batch_stocks(
         # 同步财务数据
         if request.sync_financial:
             try:
-                financial_service = await get_financial_sync_service()
-                
-                # 批量同步财务数据
-                fin_results = await financial_service.sync_financial_data(
-                    symbols=request.symbols,
-                    data_sources=[request.data_source],
-                    batch_size=10
-                )
-                
-                source_stats = fin_results.get(request.data_source)
-                if source_stats:
-                    result["financial_sync"] = {
-                        "success_count": source_stats.success_count,
-                        "error_count": source_stats.error_count,
-                        "total_symbols": source_stats.total_symbols,
-                        "message": f"成功同步 {source_stats.success_count}/{source_stats.total_symbols} 只股票的财务数据"
-                    }
-                else:
-                    result["financial_sync"] = {
-                        "success_count": 0,
-                        "error_count": len(request.symbols),
-                        "message": "财务数据同步失败"
-                    }
-                
+                attempted_sources = []
+                errors = {}
+                source_results = {}
+                remaining_symbols = [str(symbol).zfill(6) for symbol in request.symbols]
+                success_symbols = set()
+
+                for source in _source_plan(request.data_source, AUTO_FINANCIAL_SOURCES):
+                    if not remaining_symbols:
+                        break
+                    attempted_sources.append(source)
+                    try:
+                        if source == "mootdx":
+                            source_success = 0
+                            still_remaining = []
+                            for symbol in remaining_symbols:
+                                candidate = await _sync_mootdx_financial_to_db(symbol)
+                                if candidate.get("success"):
+                                    source_success += 1
+                                    success_symbols.add(symbol)
+                                else:
+                                    still_remaining.append(symbol)
+                            remaining_symbols = still_remaining
+                            source_results[source] = {"success_count": source_success}
+                            continue
+
+                        if source not in {"tushare", "akshare"}:
+                            errors[source] = f"不支持的数据源: {source}"
+                            continue
+
+                        financial_service = await get_financial_sync_service()
+                        fin_results = await financial_service.sync_financial_data(
+                            symbols=remaining_symbols,
+                            data_sources=[source],
+                            batch_size=10
+                        )
+                        source_stats = fin_results.get(source)
+                        if source_stats:
+                            source_success = source_stats.success_count
+                            source_results[source] = {
+                                "success_count": source_stats.success_count,
+                                "error_count": source_stats.error_count,
+                                "total_symbols": source_stats.total_symbols,
+                            }
+                            if source_success > 0:
+                                success_symbols.update(remaining_symbols[:source_success])
+                                remaining_symbols = remaining_symbols[source_success:]
+                        else:
+                            errors[source] = "财务数据同步失败"
+                    except Exception as source_exc:
+                        errors[source] = str(source_exc)
+
+                result["financial_sync"] = {
+                    "success_count": len(success_symbols),
+                    "error_count": len(request.symbols) - len(success_symbols),
+                    "total_symbols": len(request.symbols),
+                    "attempted_sources": attempted_sources,
+                    "source_results": source_results,
+                    "errors": errors,
+                    "message": f"成功同步 {len(success_symbols)}/{len(request.symbols)} 只股票的财务数据"
+                }
                 logger.info(f"✅ 批量财务数据同步完成: {result['financial_sync']['success_count']}/{len(request.symbols)}")
                 
             except Exception as e:
@@ -771,7 +1042,32 @@ async def sync_batch_stocks(
             try:
                 # 🔥 批量同步基础数据
                 # 注意：基础数据同步服务目前只支持 Tushare 数据源
-                if request.data_source == "tushare":
+                if str(request.data_source or "auto").lower() in {"auto", "latest", "latest_sources", "external_quotes"}:
+                    attempted_sources = list(AUTO_BASIC_SOURCES)
+                    errors = {}
+                    success_count = 0
+                    error_count = 0
+
+                    for symbol in request.symbols:
+                        candidate = await _sync_latest_basic_to_db(symbol)
+                        if candidate.get("success"):
+                            success_count += 1
+                        else:
+                            error_count += 1
+                            errors[str(symbol).zfill(6)] = candidate.get("error") or "基础数据同步失败"
+
+                    result["basic_sync"] = {
+                        "success_count": success_count,
+                        "error_count": error_count,
+                        "total_symbols": len(request.symbols),
+                        "attempted_sources": attempted_sources,
+                        "data_source_used": "mootdx_tencent" if success_count else None,
+                        "errors": errors,
+                        "message": f"成功同步 {success_count}/{len(request.symbols)} 只股票的基础数据"
+                    }
+                    logger.info(f"✅ 批量基础数据同步完成: {result['basic_sync']}")
+
+                elif request.data_source == "tushare":
                     from tradingagents.dataflows.providers.china.tushare import TushareProvider
 
                     tushare_provider = TushareProvider()

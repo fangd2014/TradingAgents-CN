@@ -10,7 +10,7 @@ export interface SingleStockSyncRequest {
   sync_historical: boolean
   sync_financial: boolean
   sync_basic?: boolean
-  data_source: 'tushare' | 'akshare'
+  data_source?: 'auto' | 'tushare' | 'akshare' | 'mootdx'
   days: number
 }
 
@@ -19,7 +19,7 @@ export interface BatchStockSyncRequest {
   sync_historical: boolean
   sync_financial: boolean
   sync_basic?: boolean
-  data_source: 'tushare' | 'akshare'
+  data_source?: 'auto' | 'tushare' | 'akshare' | 'mootdx'
   days: number
 }
 
@@ -67,18 +67,21 @@ export interface BatchStockSyncResponse {
     error_count: number
     total_records: number
     message: string
+    attempted_sources?: string[]
   } | null
   financial_sync: {
     success_count: number
     error_count: number
     total_symbols: number
     message: string
+    attempted_sources?: string[]
   } | null
   basic_sync: {
     success_count: number
     error_count: number
     total_symbols: number
     message: string
+    attempted_sources?: string[]
   } | null
 }
 
@@ -122,4 +125,3 @@ export const stockSyncApi = {
     return ApiClient.get<StockSyncStatus>(`/api/stock-sync/status/${symbol}`)
   }
 }
-

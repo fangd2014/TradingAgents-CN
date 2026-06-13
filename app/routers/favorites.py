@@ -31,8 +31,8 @@ def _is_china_etf_code(stock_code: str) -> bool:
         )
 
 
-async def _sync_etf_realtime_quotes(symbols: List[str]) -> dict:
-    """同步A股ETF实时行情到 market_quotes。"""
+async def _sync_external_realtime_quotes(symbols: List[str]) -> dict:
+    """通过 Tencent/mootdx 外部增强行情同步自选股到 market_quotes。"""
     if not symbols:
         return {"success_count": 0, "failed_count": 0, "symbols": []}
 
@@ -56,8 +56,8 @@ async def _sync_etf_realtime_quotes(symbols: List[str]) -> dict:
             "code": code,
             "symbol": code,
             "name": quote.get("name"),
-            "market": "A股ETF",
-            "instrument_type": "etf",
+            "market": "A股ETF" if _is_china_etf_code(code) else "A股",
+            "instrument_type": "etf" if _is_china_etf_code(code) else "stock",
             "close": quote.get("close"),
             "price": quote.get("close"),
             "current_price": quote.get("close"),
@@ -65,9 +65,14 @@ async def _sync_etf_realtime_quotes(symbols: List[str]) -> dict:
             "change_percent": quote.get("pct_chg"),
             "amount": quote.get("amount"),
             "volume": quote.get("volume"),
-            "data_source": quote.get("source") or "akshare_fund_etf_spot_em",
+            "source": quote.get("source") or "external_quotes",
+            "data_source": quote.get("source") or "external_quotes",
             "updated_at": datetime.utcnow(),
         }
+        for field in ("pe_ttm", "pb", "total_mv", "float_mv", "turnover_rate", "limit_up", "limit_down"):
+            if quote.get(field) is not None:
+                quote_doc[field] = quote.get(field)
+
         await db["market_quotes"].update_one(
             {"code": code},
             {"$set": quote_doc},
@@ -283,7 +288,7 @@ async def get_user_tags(
 
 class SyncFavoritesRequest(BaseModel):
     """同步自选股实时行情请求"""
-    data_source: str = "tushare"  # tushare/akshare
+    data_source: str = "external_quotes"
 
 
 @router.post("/sync-realtime", response_model=dict)
@@ -294,7 +299,7 @@ async def sync_favorites_realtime(
     """
     同步自选股实时行情
 
-    - **data_source**: 数据源（tushare/akshare）
+    - **data_source**: 数据源，固定使用 external_quotes (Tencent/mootdx)
     """
     try:
         logger.info(f"📊 开始同步自选股实时行情: user_id={current_user['id']}, data_source={request.data_source}")
@@ -317,41 +322,19 @@ async def sync_favorites_realtime(
 
         logger.info(f"🎯 需要同步的股票: {len(symbols)} 只 - {symbols}")
 
-        etf_symbols = [s for s in symbols if _is_china_etf_code(s)]
-        stock_symbols = [s for s in symbols if s not in etf_symbols]
-
-        etf_result = await _sync_etf_realtime_quotes(etf_symbols)
-        stock_result = {"success_count": 0, "failed_count": 0}
-
-        if stock_symbols:
-            # 根据数据源选择同步服务
-            if request.data_source == "tushare":
-                from app.worker.tushare_sync_service import get_tushare_sync_service
-                service = await get_tushare_sync_service()
-            elif request.data_source == "akshare":
-                from app.worker.akshare_sync_service import get_akshare_sync_service
-                service = await get_akshare_sync_service()
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"不支持的数据源: {request.data_source}"
-                )
-
-            if not service:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"{request.data_source} 服务不可用"
-                )
-
-            # 同步实时行情
-            logger.info(f"🔄 调用 {request.data_source} 同步服务...")
-            stock_result = await service.sync_realtime_quotes(
-                symbols=stock_symbols,
-                force=True  # 强制执行，跳过交易时间检查
+        if request.data_source != "external_quotes":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="自选股实时行情固定使用 external_quotes (Tencent/mootdx)，不再调用 Tushare/AKShare 行情",
             )
 
-        success_count = stock_result.get("success_count", 0) + etf_result.get("success_count", 0)
-        failed_count = stock_result.get("failed_count", stock_result.get("error_count", 0)) + etf_result.get("failed_count", 0)
+        logger.info("🔄 调用 external_quotes 同步服务...")
+        sync_result = await _sync_external_realtime_quotes(symbols)
+
+        success_count = sync_result.get("success_count", 0)
+        failed_count = sync_result.get("failed_count", 0)
+        etf_symbols = [s for s in symbols if _is_china_etf_code(s)]
+        stock_symbols = [s for s in symbols if s not in etf_symbols]
 
         logger.info(f"✅ 自选股实时行情同步完成: 成功 {success_count}/{len(symbols)} 只")
 
@@ -363,6 +346,7 @@ async def sync_favorites_realtime(
             "etf_symbols": etf_symbols,
             "stock_symbols": stock_symbols,
             "data_source": request.data_source,
+            "failed_symbols": sync_result.get("failed_symbols", []),
             "message": f"同步完成: 成功 {success_count} 只，失败 {failed_count} 只"
         })
 
@@ -373,4 +357,20 @@ async def sync_favorites_realtime(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"同步失败: {str(e)}"
+        )
+
+
+@router.post("/enrich-latest-sources", response_model=dict)
+async def enrich_favorites_latest_sources(
+    current_user: dict = Depends(get_current_user)
+):
+    """用 Tencent/mootdx 最新行情指标补全当前用户自选股信息。"""
+    try:
+        result = await favorites_service.enrich_user_favorites_latest_sources(current_user["id"])
+        return ok(result, message=result.get("message", "自选股信息补全完成"))
+    except Exception as e:
+        logger.error(f"❌ 自选股信息补全失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"补全失败: {str(e)}"
         )

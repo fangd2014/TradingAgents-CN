@@ -10,6 +10,25 @@ from app.core.database import get_mongo_db
 from app.models.user import FavoriteStock
 
 
+LATEST_CHINA_BASIC_SOURCES = [
+    "mootdx_tencent",
+    "external_quotes",
+    "tencent_finance",
+    "mootdx",
+    "mootdx_finance",
+]
+
+LATEST_QUOTE_FIELDS = [
+    "pe_ttm",
+    "pb",
+    "total_mv",
+    "float_mv",
+    "turnover_rate",
+    "limit_up",
+    "limit_down",
+]
+
+
 def _is_china_etf_code(stock_code: str) -> bool:
     try:
         from tradingagents.utils.stock_utils import StockUtils
@@ -67,6 +86,16 @@ class FavoritesService:
             "notes": favorite.get("notes", ""),
             "alert_price_high": favorite.get("alert_price_high"),
             "alert_price_low": favorite.get("alert_price_low"),
+            "pe_ttm": favorite.get("pe_ttm"),
+            "pb": favorite.get("pb"),
+            "total_mv": favorite.get("total_mv"),
+            "float_mv": favorite.get("float_mv"),
+            "turnover_rate": favorite.get("turnover_rate"),
+            "limit_up": favorite.get("limit_up"),
+            "limit_down": favorite.get("limit_down"),
+            "quote_source": favorite.get("quote_source"),
+            "enriched_at": favorite.get("enriched_at"),
+            "data_sources": favorite.get("data_sources", {}),
             # 行情占位，稍后填充
             "current_price": None,
             "change_percent": None,
@@ -96,34 +125,34 @@ class FavoritesService:
         codes = [it.get("stock_code") for it in items if it.get("stock_code")]
         if codes:
             try:
-                # 🔥 获取数据源优先级配置
-                from app.core.unified_config import UnifiedConfigManager
-                config = UnifiedConfigManager()
-                data_source_configs = await config.get_data_source_configs_async()
-
-                # 提取启用的数据源，按优先级排序
-                enabled_sources = [
-                    ds.type.lower() for ds in data_source_configs
-                    if ds.enabled and ds.type.lower() in ['tushare', 'akshare', 'baostock']
-                ]
-
-                if not enabled_sources:
-                    enabled_sources = ['tushare', 'akshare', 'baostock']
-
-                preferred_source = enabled_sources[0] if enabled_sources else 'tushare'
-
-                # 从 stock_basic_info 获取板块信息（只查询优先级最高的数据源）
+                # 优先读取最新七模块写入的基础资料，旧来源仅作为兼容兜底。
                 basic_info_coll = db["stock_basic_info"]
                 cursor = basic_info_coll.find(
-                    {"code": {"$in": codes}, "source": preferred_source},  # 🔥 添加数据源筛选
-                    {"code": 1, "sse": 1, "market": 1, "_id": 0}
+                    {
+                        "code": {"$in": codes},
+                        "$or": [
+                            {"source": {"$in": LATEST_CHINA_BASIC_SOURCES}},
+                            {"data_source": {"$in": LATEST_CHINA_BASIC_SOURCES}},
+                        ],
+                    },
+                    {"code": 1, "sse": 1, "market": 1, "source": 1, "data_source": 1, "_id": 0}
                 )
                 basic_docs = await cursor.to_list(length=None)
-                basic_map = {str(d.get("code")).zfill(6): d for d in (basic_docs or [])}
+                basic_map = {}
+                source_rank = {name: idx for idx, name in enumerate(LATEST_CHINA_BASIC_SOURCES)}
+                for doc in basic_docs or []:
+                    code_key = str(doc.get("code")).zfill(6)
+                    source = doc.get("source") or doc.get("data_source") or ""
+                    rank = source_rank.get(source, len(source_rank))
+                    current = basic_map.get(code_key)
+                    current_rank = current[0] if current else len(source_rank) + 1
+                    if rank < current_rank:
+                        basic_map[code_key] = (rank, doc)
 
                 for it in items:
                     code = it.get("stock_code")
-                    basic = basic_map.get(code)
+                    basic_entry = basic_map.get(code)
+                    basic = basic_entry[1] if basic_entry else None
                     if basic:
                         # market 字段表示板块（主板、创业板、科创板等）
                         it["board"] = basic.get("market", "-")
@@ -148,7 +177,24 @@ class FavoritesService:
                 coll = db["market_quotes"]
                 cursor = coll.find(
                     {"code": {"$in": codes}},
-                    {"code": 1, "close": 1, "pct_chg": 1, "amount": 1, "volume": 1, "_id": 0}
+                    {
+                        "code": 1,
+                        "name": 1,
+                        "close": 1,
+                        "pct_chg": 1,
+                        "amount": 1,
+                        "volume": 1,
+                        "source": 1,
+                        "data_source": 1,
+                        "pe_ttm": 1,
+                        "pb": 1,
+                        "total_mv": 1,
+                        "float_mv": 1,
+                        "turnover_rate": 1,
+                        "limit_up": 1,
+                        "limit_down": 1,
+                        "_id": 0,
+                    }
                 )
                 docs = await cursor.to_list(length=None)
                 quotes_map = {str(d.get("code")).zfill(6): d for d in (docs or [])}
@@ -156,14 +202,129 @@ class FavoritesService:
                     code = it.get("stock_code")
                     q = quotes_map.get(code)
                     if q:
+                        if q.get("name") and not it.get("stock_name"):
+                            it["stock_name"] = q.get("name")
                         it["current_price"] = q.get("close")
                         it["change_percent"] = q.get("pct_chg")
                         it["volume"] = q.get("volume")
+                        it["quote_source"] = q.get("source") or q.get("data_source") or it.get("quote_source")
+                        for field in LATEST_QUOTE_FIELDS:
+                            if q.get(field) is not None:
+                                it[field] = q.get(field)
             except Exception:
                 # 查询失败时保持占位 None，避免影响基础功能
                 pass
 
         return items
+
+    async def enrich_user_favorites_latest_sources(self, user_id: str) -> Dict[str, Any]:
+        """使用 Tencent/mootdx 最新行情通道补齐自选股信息并写入缓存。"""
+        db = await self._get_db()
+        doc = await db.user_favorites.find_one({"user_id": user_id})
+        favorites = list((doc or {}).get("favorites", []))
+        codes = sorted({str(fav.get("stock_code") or "").zfill(6) for fav in favorites if fav.get("stock_code")})
+
+        if not codes:
+            return {
+                "total": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "symbols": [],
+                "message": "没有自选股需要补全",
+            }
+
+        from app.services.china_external_data_service import ChinaQuoteService
+
+        quotes = ChinaQuoteService().get_quotes(codes)
+        now = datetime.utcnow()
+        success_codes = set()
+
+        for code, quote in quotes.items():
+            if not quote:
+                continue
+            success_codes.add(code)
+            quote_doc = {
+                "code": code,
+                "symbol": code,
+                "name": quote.get("name"),
+                "close": quote.get("close"),
+                "price": quote.get("close"),
+                "current_price": quote.get("close"),
+                "pct_chg": quote.get("pct_chg"),
+                "change_percent": quote.get("pct_chg"),
+                "amount": quote.get("amount"),
+                "volume": quote.get("volume"),
+                "open": quote.get("open"),
+                "high": quote.get("high"),
+                "low": quote.get("low"),
+                "pre_close": quote.get("pre_close"),
+                "source": quote.get("source") or "external_quotes",
+                "data_source": quote.get("source") or "external_quotes",
+                "updated_at": now,
+            }
+            for field in LATEST_QUOTE_FIELDS:
+                if quote.get(field) is not None:
+                    quote_doc[field] = quote.get(field)
+
+            await db["market_quotes"].update_one(
+                {"code": code},
+                {"$set": quote_doc},
+                upsert=True,
+            )
+            await db["stock_basic_info"].update_one(
+                {"code": code, "source": "mootdx_tencent"},
+                {
+                    "$set": {
+                        "code": code,
+                        "symbol": code,
+                        "name": quote.get("name"),
+                        "source": "mootdx_tencent",
+                        "data_source": "mootdx_tencent",
+                        "sse": "上海证券交易所" if code.startswith(("60", "68", "90")) else "深圳证券交易所",
+                        "market": "ETF" if _is_china_etf_code(code) else "-",
+                        "updated_at": now,
+                    }
+                },
+                upsert=True,
+            )
+
+        enriched_favorites = []
+        for fav in favorites:
+            code = str(fav.get("stock_code") or "").zfill(6)
+            quote = quotes.get(code)
+            updated = dict(fav)
+            if quote:
+                if quote.get("name"):
+                    updated["stock_name"] = updated.get("stock_name") or quote.get("name")
+                updated["quote_source"] = quote.get("source") or "external_quotes"
+                updated["data_sources"] = {
+                    **dict(updated.get("data_sources") or {}),
+                    "quote": quote.get("source") or "external_quotes",
+                    "metrics": "tencent_finance",
+                    "basic": "mootdx_tencent",
+                }
+                updated["enriched_at"] = now.isoformat()
+                for field in LATEST_QUOTE_FIELDS:
+                    if quote.get(field) is not None:
+                        updated[field] = quote.get(field)
+            enriched_favorites.append(updated)
+
+        await db.user_favorites.update_one(
+            {"user_id": user_id},
+            {"$set": {"favorites": enriched_favorites, "updated_at": now}},
+            upsert=False,
+        )
+
+        failed_codes = [code for code in codes if code not in success_codes]
+        return {
+            "total": len(codes),
+            "success_count": len(success_codes),
+            "failed_count": len(failed_codes),
+            "symbols": codes,
+            "failed_symbols": failed_codes,
+            "data_source": "external_quotes",
+            "message": f"补全完成: 成功 {len(success_codes)} 只，失败 {len(failed_codes)} 只",
+        }
 
     async def add_favorite(
         self,

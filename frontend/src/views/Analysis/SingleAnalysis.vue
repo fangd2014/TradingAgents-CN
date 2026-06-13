@@ -737,6 +737,7 @@ import { recommendModels } from '@/api/modelCapabilities'
 import { validateStockCode, getStockCodeFormatHelp } from '@/utils/stockValidator'
 import { normalizeMarketForAnalysis, getMarketByStockCode } from '@/utils/market'
 import { resolveStockInput } from '@/utils/stockInputResolver'
+import { formatLocalDate } from '@/utils/datetime'
 
 // 配置marked选项
 marked.setOptions({
@@ -966,18 +967,13 @@ const submitAnalysis = async () => {
   submitting.value = true
 
   try {
-    // 确保 analysisDate 是 Date 对象
-    const analysisDate = analysisForm.analysisDate instanceof Date
-      ? analysisForm.analysisDate
-      : new Date(analysisForm.analysisDate)
-
     const request: SingleAnalysisRequest = {
       symbol: analysisForm.symbol,
       stock_code: analysisForm.symbol,  // 兼容字段
       stock_name: resolvedStock?.name,
       parameters: {
         market_type: analysisForm.market,
-        analysis_date: analysisDate.toISOString().split('T')[0],
+        analysis_date: formatLocalDate(analysisForm.analysisDate),
         research_depth: getDepthDescription(analysisForm.researchDepth),
         selected_analysts: convertAnalystNamesToIds(analysisForm.selectedAnalysts),
         include_sentiment: analysisForm.includeSentiment,
@@ -1473,7 +1469,7 @@ const downloadReport = async (format: string = 'markdown') => {
       analysisResults.value?.stock_symbol ||
       analysisResults.value?.symbol ||
       'stock'
-    const dateStr = analysisResults.value?.analysis_date || new Date().toISOString().slice(0, 10)
+    const dateStr = analysisResults.value?.analysis_date || formatLocalDate(new Date())
 
     // 根据格式设置文件扩展名
     const ext = getFileExtension(format)

@@ -195,8 +195,19 @@ async def validate_config():
                         "env_configured": False  # 新增：环境变量是否配置
                     }
 
-                    # 某些数据源不需要 API Key（如 AKShare）
-                    if ds_config.type in ["akshare", "yahoo"]:
+                    ds_type = ds_config.type.value if hasattr(ds_config.type, 'value') else str(ds_config.type)
+                    no_key_required_sources = {
+                        "akshare",
+                        "yahoo",
+                        "external_quotes",
+                        "tencent_finance",
+                        "mootdx",
+                        "eastmoney_reportapi",
+                        "akshare_news",
+                        "cninfo",
+                    }
+
+                    if ds_type in no_key_required_sources:
                         validation_item["has_api_key"] = True
                         validation_item["status"] = "已配置（无需密钥）"
                         validation_item["source"] = "builtin"
@@ -208,7 +219,6 @@ async def validate_config():
                         validation_item["mongodb_configured"] = db_key_valid
 
                         # 检查环境变量中的 API Key 是否有效
-                        ds_type = ds_config.type.value if hasattr(ds_config.type, 'value') else ds_config.type
                         env_key = get_env_api_key_for_datasource(ds_type)
                         env_key_valid = env_key is not None
                         validation_item["env_configured"] = env_key_valid

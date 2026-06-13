@@ -80,6 +80,15 @@
               <el-icon><Refresh /></el-icon>
               同步实时行情
             </el-button>
+            <el-button
+              v-if="hasAStocks"
+              type="warning"
+              @click="enrichLatestSources"
+              :loading="enrichLoading"
+            >
+              <el-icon><Refresh /></el-icon>
+              补全股票信息
+            </el-button>
             <!-- 只有选中的股票都是A股时才显示批量同步按钮 -->
             <el-button
               v-if="selectedStocksAreAllAShares"
@@ -151,6 +160,24 @@
               {{ formatPercent(row.change_percent) }}
             </span>
             <span v-else>-</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="pe_ttm" label="PE(TTM)" width="95">
+          <template #default="{ row }">
+            {{ row.pe_ttm !== null && row.pe_ttm !== undefined ? formatPrice(row.pe_ttm) : '-' }}
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="pb" label="PB" width="80">
+          <template #default="{ row }">
+            {{ row.pb !== null && row.pb !== undefined ? formatPrice(row.pb) : '-' }}
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="turnover_rate" label="换手率" width="95">
+          <template #default="{ row }">
+            {{ row.turnover_rate !== null && row.turnover_rate !== undefined ? formatPercent(row.turnover_rate) : '-' }}
           </template>
         </el-table-column>
 
@@ -424,10 +451,8 @@
           </el-checkbox-group>
         </el-form-item>
         <el-form-item label="数据源">
-          <el-radio-group v-model="batchSyncForm.dataSource">
-            <el-radio label="tushare">Tushare</el-radio>
-            <el-radio label="akshare">AKShare</el-radio>
-          </el-radio-group>
+          <el-tag type="success">自动按优先级尝试</el-tag>
+          <span class="source-priority-text">实时 external_quotes；历史 mootdx → Tushare → AKShare；财务 mootdx → Tushare → AKShare；基础 mootdx/腾讯</span>
         </el-form-item>
         <el-form-item label="历史数据天数" v-if="batchSyncForm.syncTypes.includes('historical')">
           <el-input-number v-model="batchSyncForm.days" :min="1" :max="3650" />
@@ -475,10 +500,8 @@
           </el-checkbox-group>
         </el-form-item>
         <el-form-item label="数据源">
-          <el-radio-group v-model="singleSyncForm.dataSource">
-            <el-radio label="tushare">Tushare</el-radio>
-            <el-radio label="akshare">AKShare</el-radio>
-          </el-radio-group>
+          <el-tag type="success">自动按优先级尝试</el-tag>
+          <span class="source-priority-text">实时 external_quotes；历史 mootdx → Tushare → AKShare；财务 mootdx → Tushare → AKShare；基础 mootdx/腾讯</span>
         </el-form-item>
         <el-form-item label="历史数据天数" v-if="singleSyncForm.syncTypes.includes('historical')">
           <el-input-number v-model="singleSyncForm.days" :min="1" :max="3650" />
@@ -555,7 +578,7 @@ const batchSyncDialogVisible = ref(false)
 const batchSyncLoading = ref(false)
 const batchSyncForm = ref({
   syncTypes: ['historical', 'financial'],
-  dataSource: 'tushare' as 'tushare' | 'akshare',
+  dataSource: 'auto' as 'auto' | 'tushare' | 'akshare' | 'mootdx',
   days: 365
 })
 
@@ -568,7 +591,7 @@ const currentSyncStock = ref({
 })
 const singleSyncForm = ref({
   syncTypes: ['realtime'],  // 默认只选中实时行情（最常用）
-  dataSource: 'tushare' as 'tushare' | 'akshare',
+  dataSource: 'auto' as 'auto' | 'tushare' | 'akshare' | 'mootdx',
   days: 365
 })
 
@@ -732,7 +755,7 @@ const syncAllRealtime = async () => {
 
   syncRealtimeLoading.value = true
   try {
-    const res = await favoritesApi.syncRealtime('tushare')
+    const res = await favoritesApi.syncRealtime('external_quotes')
     const data = (res as any)?.data
 
     if ((res as any)?.success) {
@@ -747,6 +770,32 @@ const syncAllRealtime = async () => {
     ElMessage.error(error.message || '同步失败，请稍后重试')
   } finally {
     syncRealtimeLoading.value = false
+  }
+}
+
+const enrichLoading = ref(false)
+const enrichLatestSources = async () => {
+  if (favorites.value.length === 0) {
+    ElMessage.warning('没有自选股需要补全')
+    return
+  }
+
+  enrichLoading.value = true
+  try {
+    const res = await favoritesApi.enrichLatestSources()
+    const data = (res as any)?.data
+
+    if ((res as any)?.success) {
+      ElMessage.success(data?.message || `补全完成: 成功 ${data?.success_count} 只`)
+      await loadFavorites()
+    } else {
+      ElMessage.error((res as any)?.message || '补全失败')
+    }
+  } catch (error: any) {
+    console.error('补全自选股信息失败:', error)
+    ElMessage.error(error.message || '补全失败，请稍后重试')
+  } finally {
+    enrichLoading.value = false
   }
 }
 
@@ -1074,11 +1123,17 @@ const handleSingleSync = async () => {
 
   singleSyncLoading.value = true
   try {
+    const wantsRealtime = singleSyncForm.value.syncTypes.includes('realtime')
+    const wantsHistorical = singleSyncForm.value.syncTypes.includes('historical')
+    const wantsFinancial = singleSyncForm.value.syncTypes.includes('financial')
+    const wantsBasic = singleSyncForm.value.syncTypes.includes('basic')
+
     const res = await stockSyncApi.syncSingle({
       symbol: currentSyncStock.value.stock_code,
-      sync_realtime: singleSyncForm.value.syncTypes.includes('realtime'),
-      sync_historical: singleSyncForm.value.syncTypes.includes('historical'),
-      sync_financial: singleSyncForm.value.syncTypes.includes('financial'),
+      sync_realtime: wantsRealtime,
+      sync_historical: wantsHistorical,
+      sync_financial: wantsFinancial,
+      sync_basic: wantsBasic,
       data_source: singleSyncForm.value.dataSource,
       days: singleSyncForm.value.days
     })
@@ -1089,7 +1144,7 @@ const handleSingleSync = async () => {
 
       if (data.realtime_sync) {
         if (data.realtime_sync.success) {
-          message += `✅ 实时行情同步成功\n`
+          message += `✅ 实时行情同步成功（${data.realtime_sync.data_source_used || 'auto'}）\n`
         } else {
           message += `❌ 实时行情同步失败: ${data.realtime_sync.error || '未知错误'}\n`
         }
@@ -1097,7 +1152,7 @@ const handleSingleSync = async () => {
 
       if (data.historical_sync) {
         if (data.historical_sync.success) {
-          message += `✅ 历史数据: ${data.historical_sync.records || 0} 条记录\n`
+          message += `✅ 历史数据: ${data.historical_sync.records || 0} 条记录（${data.historical_sync.data_source_used || 'auto'}）\n`
         } else {
           message += `❌ 历史数据同步失败: ${data.historical_sync.error || '未知错误'}\n`
         }
@@ -1105,7 +1160,7 @@ const handleSingleSync = async () => {
 
       if (data.financial_sync) {
         if (data.financial_sync.success) {
-          message += `✅ 财务数据同步成功\n`
+          message += `✅ 财务数据同步成功（${data.financial_sync.data_source_used || 'auto'}）\n`
         } else {
           message += `❌ 财务数据同步失败: ${data.financial_sync.error || '未知错误'}\n`
         }
@@ -1113,7 +1168,7 @@ const handleSingleSync = async () => {
 
       if (data.basic_sync) {
         if (data.basic_sync.success) {
-          message += `✅ 基础数据同步成功\n`
+          message += `✅ 基础数据同步成功（${data.basic_sync.data_source_used || 'auto'}）\n`
         } else {
           message += `❌ 基础数据同步失败: ${data.basic_sync.error || '未知错误'}\n`
         }
@@ -1161,6 +1216,7 @@ const handleBatchSync = async () => {
       symbols,
       sync_historical: batchSyncForm.value.syncTypes.includes('historical'),
       sync_financial: batchSyncForm.value.syncTypes.includes('financial'),
+      sync_basic: batchSyncForm.value.syncTypes.includes('basic'),
       data_source: batchSyncForm.value.dataSource,
       days: batchSyncForm.value.days
     })
@@ -1170,15 +1226,15 @@ const handleBatchSync = async () => {
       let message = `批量同步完成 (共 ${symbols.length} 只股票)\n`
 
       if (data.historical_sync) {
-        message += `✅ 历史数据: ${data.historical_sync.success_count}/${data.historical_sync.success_count + data.historical_sync.error_count} 成功，共 ${data.historical_sync.total_records} 条记录\n`
+        message += `✅ 历史数据: ${data.historical_sync.success_count}/${data.historical_sync.success_count + data.historical_sync.error_count} 成功，共 ${data.historical_sync.total_records} 条记录（${data.historical_sync.attempted_sources?.join(' → ') || 'auto'}）\n`
       }
 
       if (data.financial_sync) {
-        message += `✅ 财务数据: ${data.financial_sync.success_count}/${data.financial_sync.total_symbols} 成功\n`
+        message += `✅ 财务数据: ${data.financial_sync.success_count}/${data.financial_sync.total_symbols} 成功（${data.financial_sync.attempted_sources?.join(' → ') || 'auto'}）\n`
       }
 
       if (data.basic_sync) {
-        message += `✅ 基础数据: ${data.basic_sync.success_count}/${data.basic_sync.total_symbols} 成功\n`
+        message += `✅ 基础数据: ${data.basic_sync.success_count}/${data.basic_sync.total_symbols} 成功（${data.basic_sync.attempted_sources?.join(' → ') || 'auto'}）\n`
       }
 
       ElMessage.success(message)
@@ -1259,6 +1315,13 @@ onMounted(() => {
       gap: 8px;
       justify-content: flex-end;
     }
+  }
+
+  .source-priority-text {
+    margin-left: 10px;
+    color: var(--el-text-color-secondary);
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   /* 颜色选项样式 */

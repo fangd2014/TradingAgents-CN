@@ -161,6 +161,14 @@ class DataSourceType(str, Enum):
     TUSHARE = "tushare"
     AKSHARE = "akshare"
     BAOSTOCK = "baostock"
+    MOOTDX = "mootdx"
+    TENCENT_FINANCE = "tencent_finance"
+    EASTMONEY_REPORTAPI = "eastmoney_reportapi"
+    IWENCAI = "iwencai"
+    THS_HOTSPOT = "ths_hotspot"
+    AKSHARE_NEWS = "akshare_news"
+    CNINFO = "cninfo"
+    EXTERNAL_QUOTES = "external_quotes"
 
     # 美股数据源
     FINNHUB = "finnhub"
@@ -259,6 +267,116 @@ class DataSourceConfig(BaseModel):
     provider: Optional[str] = Field(None, description="数据提供商")
     created_at: Optional[datetime] = Field(default_factory=now_tz, description="创建时间")
     updated_at: Optional[datetime] = Field(default_factory=now_tz, description="更新时间")
+
+
+def build_latest_china_data_source_configs(iwencai_cookie: str = "") -> List[DataSourceConfig]:
+    """Seven-module China data source defaults for low-risk A-share data paths."""
+    iwencai_enabled = bool(str(iwencai_cookie or "").strip())
+    return [
+        DataSourceConfig(
+            name="External Quotes",
+            type=DataSourceType.EXTERNAL_QUOTES,
+            endpoint="/api/china-data/quotes",
+            timeout=5,
+            rate_limit=600,
+            enabled=True,
+            priority=100,
+            market_categories=["a_shares"],
+            display_name="行情聚合(Tencent/mootdx)",
+            provider="Tencent Finance + mootdx",
+            description="A股实时行情默认通道，避免高频调用AKShare/东财行情。",
+        ),
+        DataSourceConfig(
+            name="Tencent Finance",
+            type=DataSourceType.TENCENT_FINANCE,
+            endpoint="https://qt.gtimg.cn/q=",
+            timeout=5,
+            rate_limit=600,
+            enabled=True,
+            priority=95,
+            market_categories=["a_shares"],
+            display_name="腾讯财经指标",
+            provider="Tencent Finance",
+            description="PE(TTM)、PB、市值、换手率、涨跌停价等公开行情指标。",
+        ),
+        DataSourceConfig(
+            name="mootdx",
+            type=DataSourceType.MOOTDX,
+            timeout=5,
+            rate_limit=300,
+            enabled=True,
+            priority=90,
+            market_categories=["a_shares"],
+            display_name="mootdx深行情",
+            provider="TongDaXin public servers",
+            description="通达信TCP协议，提供深行情、K线、逐笔、finance和F10。",
+        ),
+        DataSourceConfig(
+            name="Eastmoney ReportAPI",
+            type=DataSourceType.EASTMONEY_REPORTAPI,
+            endpoint="https://reportapi.eastmoney.com/report/list",
+            timeout=8,
+            rate_limit=120,
+            enabled=True,
+            priority=80,
+            market_categories=["a_shares"],
+            display_name="东财研报",
+            provider="Eastmoney",
+            description="研报列表、三年EPS预测和PDF下载元数据。",
+        ),
+        DataSourceConfig(
+            name="iWenCai pywencai",
+            type=DataSourceType.IWENCAI,
+            endpoint="pywencai://iwencai",
+            timeout=8,
+            rate_limit=60,
+            enabled=iwencai_enabled,
+            priority=70,
+            market_categories=["a_shares"],
+            display_name="i问财语义搜索",
+            provider="iWenCai",
+            description="自然语言语义检索，标准访问方式为pywencai库加登录Cookie。",
+        ),
+        DataSourceConfig(
+            name="THS Hotspot Tags",
+            type=DataSourceType.THS_HOTSPOT,
+            endpoint="pywencai://iwencai",
+            timeout=8,
+            rate_limit=60,
+            enabled=iwencai_enabled,
+            priority=65,
+            market_categories=["a_shares"],
+            display_name="同花顺热点归因",
+            provider="THS/iWenCai",
+            description="同花顺题材tags和热点归因，复用pywencai和IWENCAI_COOKIE。",
+        ),
+        DataSourceConfig(
+            name="AKShare News Trio",
+            type=DataSourceType.AKSHARE_NEWS,
+            endpoint="akshare://stock_news_em,stock_info_global_cls,stock_info_global_em",
+            timeout=10,
+            rate_limit=60,
+            enabled=True,
+            priority=55,
+            market_categories=["a_shares"],
+            display_name="AKShare新闻三件套",
+            provider="AKShare",
+            description="东财个股新闻、财联社快讯、东财全球资讯，低频调用。",
+        ),
+        DataSourceConfig(
+            name="Cninfo Announcements",
+            type=DataSourceType.CNINFO,
+            endpoint="akshare://stock_zh_a_disclosure_report_cninfo",
+            timeout=10,
+            rate_limit=60,
+            enabled=True,
+            priority=50,
+            market_categories=["a_shares"],
+            display_name="巨潮公告",
+            provider="Cninfo via AKShare",
+            description="沪深北公告全文入口，mootdx F10提供摘要补充。",
+        ),
+    ]
 
 
 class DatabaseConfig(BaseModel):

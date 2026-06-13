@@ -52,6 +52,66 @@ class USDataSource(Enum):
     FINNHUB = DataSourceCode.FINNHUB  # Finnhub（备用数据源）
 
 
+class LatestQuoteUnavailableError(RuntimeError):
+    """Raised when an A-share report cannot obtain a direct latest quote."""
+
+
+def _code6(value: Any) -> str:
+    digits = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
+    if not digits:
+        return ""
+    return digits[-6:].zfill(6)
+
+
+def _fetch_latest_external_quote_with_reason(symbol: str) -> tuple[Optional[Dict[str, Any]], str]:
+    """Fetch the latest quote directly from the external realtime quote facade."""
+    code = _code6(symbol)
+    if not code:
+        return None, "股票代码为空或格式无效"
+
+    try:
+        from app.services.china_external_data_service import ChinaQuoteService
+
+        quote = ChinaQuoteService(timeout_seconds=5).get_quotes([code]).get(code)
+        if quote and quote.get("close") is not None:
+            return quote, ""
+        return None, "Tencent Finance/mootdx returned no quote"
+    except Exception as exc:
+        logger.warning("⚠️ [实时行情] 直连最新行情失败 code=%s: %s", code, exc)
+        return None, str(exc)
+
+
+def _fetch_latest_external_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    quote, _reason = _fetch_latest_external_quote_with_reason(symbol)
+    return quote
+
+
+def require_latest_external_quote(symbol: str, context: str = "生成分析报告") -> Dict[str, Any]:
+    code = _code6(symbol) or str(symbol or "").strip()
+    quote, reason = _fetch_latest_external_quote_with_reason(symbol)
+    if quote:
+        return quote
+    raise LatestQuoteUnavailableError(
+        f"无法获取{code}最新行情数据，已中断{context}。"
+        f"失败原因: {reason or '实时行情源未返回有效价格'}。"
+        "请检查腾讯财经/mootdx实时行情通道、网络连接或股票代码。"
+    )
+
+
+def _overlay_latest_quote(result: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+    quote = _fetch_latest_external_quote(symbol)
+    if not quote:
+        result["quote_source"] = result.get("quote_source") or "external_quotes_unavailable"
+        return result
+
+    result["current_price"] = quote.get("close")
+    result["change_pct"] = quote.get("pct_chg")
+    result["volume"] = quote.get("volume")
+    result["quote_source"] = quote.get("source") or "external_quotes"
+    result["quote_date"] = quote.get("trade_date") or quote.get("datetime")
+    return result
+
+
 
 
 
@@ -1456,7 +1516,7 @@ class DataSourceManager:
         if use_cache:
 
             try:
-                from .cache.app_adapter import get_basics_from_cache, get_market_quote_dataframe
+                from .cache.app_adapter import get_basics_from_cache
                 doc = get_basics_from_cache(symbol)
                 if doc:
                     name = doc.get('name') or doc.get('stock_name') or ''
@@ -1490,19 +1550,16 @@ class DataSourceManager:
                         'list_date': doc.get('list_date', '未知'),
                         'source': 'app_cache'
                     }
-                    # 追加快照行情（若存在）
-                    try:
-                        df = get_market_quote_dataframe(symbol)
-                        if df is not None and not df.empty:
-                            row = df.iloc[-1]
-                            result['current_price'] = row.get('close')
-                            result['change_pct'] = row.get('pct_chg')
-                            result['volume'] = row.get('volume')
-                            result['quote_date'] = row.get('date')
-                            result['quote_source'] = 'market_quotes'
-                            logger.info(f"✅ [股票信息] 附加行情 | price={result['current_price']} pct={result['change_pct']} vol={result['volume']} code={symbol}")
-                    except Exception as _e:
-                        logger.debug(f"附加行情失败（忽略）：{_e}")
+                    result = _overlay_latest_quote(result, symbol)
+                    if result.get("current_price") is not None:
+                        logger.info(
+                            "✅ [股票信息] 附加直连最新行情 | price=%s pct=%s vol=%s source=%s code=%s",
+                            result.get("current_price"),
+                            result.get("change_pct"),
+                            result.get("volume"),
+                            result.get("quote_source"),
+                            symbol,
+                        )
 
                     if name:
                         logger.info(f"✅ [数据来源: MongoDB-stock_basic_info] 成功获取: {symbol}")
@@ -1647,7 +1704,7 @@ class DataSourceManager:
                 # 检查是否获取到有效信息
                 if result.get('name') and result['name'] != f'股票{symbol}':
                     logger.info(f"✅ [数据来源: 备用数据源] 降级成功获取股票信息: {source_name}")
-                    return result
+                    return _overlay_latest_quote(result, symbol)
                 else:
                     logger.warning(f"⚠️ [数据来源: {source_name}] 返回无效信息")
 
@@ -1657,7 +1714,7 @@ class DataSourceManager:
 
         # 所有数据源都失败，返回默认值
         logger.error(f"❌ 所有数据源都无法获取{symbol}的股票信息")
-        return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'unknown'}
+        return _overlay_latest_quote({'symbol': symbol, 'name': f'股票{symbol}', 'source': 'unknown'}, symbol)
 
     def _get_akshare_stock_info(self, symbol: str) -> Dict:
         """使用AKShare获取股票基本信息

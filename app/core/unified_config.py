@@ -13,7 +13,8 @@ from dataclasses import dataclass, asdict
 
 from app.models.config import (
     LLMConfig, DataSourceConfig, DatabaseConfig, SystemConfig,
-    ModelProvider, DataSourceType, DatabaseType
+    ModelProvider, DataSourceType, DatabaseType,
+    build_latest_china_data_source_configs
 )
 
 
@@ -292,35 +293,7 @@ class UnifiedConfigManager:
         except Exception as e:
             print(f"⚠️ [unified_config] 从数据库读取数据源配置失败: {e}，使用硬编码配置")
 
-        # 🔥 回退到硬编码配置（兼容性）
-        settings = self.get_system_settings()
-        data_sources = []
-
-        # AKShare (默认启用)
-        akshare_config = DataSourceConfig(
-            name="AKShare",
-            type=DataSourceType.AKSHARE,
-            endpoint="https://akshare.akfamily.xyz",
-            enabled=True,
-            priority=1,
-            description="AKShare开源金融数据接口"
-        )
-        data_sources.append(akshare_config)
-
-        # Tushare (如果有配置)
-        if settings.get("tushare_token"):
-            tushare_config = DataSourceConfig(
-                name="Tushare",
-                type=DataSourceType.TUSHARE,
-                api_key=settings.get("tushare_token"),
-                endpoint="http://api.tushare.pro",
-                enabled=True,
-                priority=2,
-                description="Tushare专业金融数据接口"
-            )
-            data_sources.append(tushare_config)
-
-        # 按优先级排序
+        data_sources = build_latest_china_data_source_configs(os.getenv("IWENCAI_COOKIE", ""))
         data_sources.sort(key=lambda x: x.priority, reverse=True)
         return data_sources
 
@@ -360,47 +333,8 @@ class UnifiedConfigManager:
         except Exception as e:
             print(f"⚠️ [unified_config] 从数据库读取数据源配置失败: {e}，使用硬编码配置")
 
-        # 🔥 回退到硬编码配置（兼容性）
-        settings = self.get_system_settings()
-        data_sources = []
-
-        # AKShare (默认启用)
-        akshare_config = DataSourceConfig(
-            name="AKShare",
-            type=DataSourceType.AKSHARE,
-            endpoint="https://akshare.akfamily.xyz",
-            enabled=True,
-            priority=1,
-            description="AKShare开源金融数据接口"
-        )
-        data_sources.append(akshare_config)
-
-        # Tushare (如果有配置)
-        if settings.get("tushare_token"):
-            tushare_config = DataSourceConfig(
-                name="Tushare",
-                type=DataSourceType.TUSHARE,
-                api_key=settings.get("tushare_token"),
-                endpoint="http://api.tushare.pro",
-                enabled=True,
-                priority=2,
-                description="Tushare专业金融数据接口"
-            )
-            data_sources.append(tushare_config)
-
-        # Finnhub (如果有配置)
-        if settings.get("finnhub_api_key"):
-            finnhub_config = DataSourceConfig(
-                name="Finnhub",
-                type=DataSourceType.FINNHUB,
-                api_key=settings.get("finnhub_api_key"),
-                endpoint="https://finnhub.io/api/v1",
-                enabled=True,
-                priority=3,
-                description="Finnhub股票数据接口"
-            )
-            data_sources.append(finnhub_config)
-
+        data_sources = build_latest_china_data_source_configs(os.getenv("IWENCAI_COOKIE", ""))
+        data_sources.sort(key=lambda x: x.priority, reverse=True)
         return data_sources
     
     # ==================== 数据库配置管理 ====================
@@ -448,7 +382,7 @@ class UnifiedConfigManager:
                 llm_configs=self.get_llm_configs(),
                 default_llm=self.get_default_model(),
                 data_source_configs=self.get_data_source_configs(),
-                default_data_source="AKShare",
+                default_data_source="External Quotes",
                 database_configs=self.get_database_configs(),
                 system_settings=self.get_system_settings()
             )

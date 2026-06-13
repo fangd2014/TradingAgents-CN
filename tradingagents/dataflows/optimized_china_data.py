@@ -23,6 +23,60 @@ logger = get_logger('agents')
 from .cache.mongodb_cache_adapter import get_mongodb_cache_adapter, get_stock_data_with_fallback, get_financial_data_with_fallback
 
 
+def _fetch_latest_external_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    try:
+        from .data_source_manager import _fetch_latest_external_quote as fetch_quote
+
+        return fetch_quote(symbol)
+    except Exception as exc:
+        logger.warning(f"⚠️ [实时行情] 直连最新行情失败: {symbol} - {exc}")
+        return None
+
+
+def require_latest_external_quote(symbol: str, context: str = "生成分析报告") -> Dict[str, Any]:
+    from .data_source_manager import require_latest_external_quote as require_quote
+
+    return require_quote(symbol, context=context)
+
+
+def _format_quote_change(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):+.2f}%"
+    except Exception:
+        return str(value)
+
+
+def _quote_value(quote: Optional[Dict[str, Any]], key: str) -> Any:
+    if not quote:
+        return None
+    return quote.get(key)
+
+
+def _replace_or_append_line(text: str, label: str, value: Any) -> str:
+    if value is None:
+        return text
+    lines = text.splitlines()
+    replacement = f"{label}: {value}"
+    for idx, line in enumerate(lines):
+        if line.startswith(f"{label}:"):
+            lines[idx] = replacement
+            return "\n".join(lines)
+    lines.append(replacement)
+    return "\n".join(lines)
+
+
+def _merge_latest_quote_text(stock_info: str, quote: Optional[Dict[str, Any]]) -> str:
+    if not quote:
+        return stock_info
+    result = _replace_or_append_line(stock_info, "当前价格", _quote_value(quote, "close"))
+    result = _replace_or_append_line(result, "涨跌幅", _format_quote_change(_quote_value(quote, "pct_chg")))
+    result = _replace_or_append_line(result, "成交量", _quote_value(quote, "volume"))
+    result = _replace_or_append_line(result, "行情来源", quote.get("source") or "external_quotes")
+    return result
+
+
 class OptimizedChinaDataProvider:
     """优化的A股数据提供器 - 集成缓存和Tushare数据接口"""
 
@@ -281,31 +335,22 @@ class OptimizedChinaDataProvider:
 
             # 如果获取成功，直接返回基础信息
             if stock_info and "股票名称:" in stock_info:
+                latest_quote = _fetch_latest_external_quote(symbol)
+                if latest_quote:
+                    stock_info = _merge_latest_quote_text(stock_info, latest_quote)
                 logger.debug(f"📊 [基本面优化] 成功获取{symbol}基础信息，无需历史数据")
                 return stock_info
 
-            # 如果基础信息获取失败，尝试从缓存获取最基本的信息
-            try:
-                from tradingagents.config.runtime_settings import use_app_cache_enabled
-                if use_app_cache_enabled(False):
-                    from .cache.app_adapter import get_market_quote_dataframe
-                    df_q = get_market_quote_dataframe(symbol)
-                    if df_q is not None and not df_q.empty:
-                        row_q = df_q.iloc[-1]
-                        current_price = str(row_q.get('close', 'N/A'))
-                        change_pct = f"{float(row_q.get('pct_chg', 0)):+.2f}%" if row_q.get('pct_chg') is not None else 'N/A'
-                        volume = str(row_q.get('volume', 'N/A'))
-
-                        # 构造基础信息格式
-                        basic_info = f"""股票代码: {symbol}
+            latest_quote = _fetch_latest_external_quote(symbol)
+            if latest_quote:
+                basic_info = f"""股票代码: {symbol}
 股票名称: 未知公司
-当前价格: {current_price}
-涨跌幅: {change_pct}
-成交量: {volume}"""
-                        logger.debug(f"📊 [基本面优化] 从缓存构造{symbol}基础信息")
-                        return basic_info
-            except Exception as e:
-                logger.debug(f"📊 [基本面优化] 从缓存获取基础信息失败: {e}")
+当前价格: {latest_quote.get('close', 'N/A')}
+涨跌幅: {_format_quote_change(latest_quote.get('pct_chg'))}
+成交量: {latest_quote.get('volume', 'N/A')}
+行情来源: {latest_quote.get('source', 'external_quotes')}"""
+                logger.debug(f"📊 [基本面优化] 使用直连最新行情构造{symbol}基础信息")
+                return basic_info
 
             # 如果都失败了，返回最基本的信息
             return f"股票代码: {symbol}\n股票名称: 未知公司\n当前价格: N/A\n涨跌幅: N/A\n成交量: N/A"
@@ -334,6 +379,18 @@ class OptimizedChinaDataProvider:
         current_price = "N/A"
         volume = "N/A"
         change_pct = "N/A"
+        latest_quote = require_latest_external_quote(symbol, context="生成分析报告")
+        current_price = str(latest_quote.get("close"))
+        change_pct = _format_quote_change(latest_quote.get("pct_chg"))
+        volume = str(latest_quote.get("volume", "N/A"))
+        logger.info(
+            "✅ [股票代码追踪] 使用直连最新行情: code=%s price=%s pct=%s volume=%s source=%s",
+            symbol,
+            current_price,
+            change_pct,
+            volume,
+            latest_quote.get("source"),
+        )
 
         # 首先尝试从统一接口获取股票基本信息
         try:
@@ -352,48 +409,20 @@ class OptimizedChinaDataProvider:
         except Exception as e:
             logger.warning(f"⚠️ 获取股票基本信息失败: {e}")
 
-        # 若仍缺失当前价格/涨跌幅/成交量，且启用app缓存，则直接读取 market_quotes 兜底
-        try:
-            if (current_price == "N/A" or change_pct == "N/A" or volume == "N/A"):
-                from tradingagents.config.runtime_settings import use_app_cache_enabled  # type: ignore
-                if use_app_cache_enabled(False):
-                    from .cache.app_adapter import get_market_quote_dataframe
-                    df_q = get_market_quote_dataframe(symbol)
-                    if df_q is not None and not df_q.empty:
-                        row_q = df_q.iloc[-1]
-                        if current_price == "N/A" and row_q.get('close') is not None:
-                            current_price = str(row_q.get('close'))
-                            logger.debug(f"🔍 [股票代码追踪] 从market_quotes补齐当前价格: {current_price}")
-                        if change_pct == "N/A" and row_q.get('pct_chg') is not None:
-                            try:
-                                change_pct = f"{float(row_q.get('pct_chg')):+.2f}%"
-                            except Exception:
-                                change_pct = str(row_q.get('pct_chg'))
-                            logger.debug(f"🔍 [股票代码追踪] 从market_quotes补齐涨跌幅: {change_pct}")
-                        if volume == "N/A" and row_q.get('volume') is not None:
-                            volume = str(row_q.get('volume'))
-                            logger.debug(f"🔍 [股票代码追踪] 从market_quotes补齐成交量: {volume}")
-        except Exception as _qe:
-            logger.debug(f"🔍 [股票代码追踪] 读取market_quotes失败（忽略）: {_qe}")
-
-        # 然后从股票数据中提取价格信息
+        # 然后从股票数据中提取价格信息。直连最新行情已经存在时，不允许旧缓存覆盖。
         if "股票名称:" in stock_data:
             lines = stock_data.split('\n')
             for line in lines:
                 if "股票名称:" in line and company_name == "未知公司":
                     company_name = line.split(':')[1].strip()
                 elif "当前价格:" in line:
-                    current_price = line.split(':')[1].strip()
+                    continue
                 elif "最新价格:" in line or "💰 最新价格:" in line:
-                    # 兼容另一种模板输出
-                    try:
-                        current_price = line.split(':', 1)[1].strip().lstrip('¥').strip()
-                    except Exception:
-                        current_price = line.split(':')[-1].strip()
+                    continue
                 elif "涨跌幅:" in line:
-                    change_pct = line.split(':')[1].strip()
+                    continue
                 elif "成交量:" in line:
-                    volume = line.split(':')[1].strip()
+                    continue
 
         # 尝试从股票数据表格中提取最新价格信息
         if current_price == "N/A" and stock_data:

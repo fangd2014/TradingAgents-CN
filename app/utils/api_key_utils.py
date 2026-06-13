@@ -105,6 +105,7 @@ def get_env_api_key_for_datasource(ds_type: str) -> Optional[str]:
     - iex → IEX_API_KEY
     - quandl → QUANDL_API_KEY
     - alphavantage → ALPHAVANTAGE_API_KEY
+    - iwencai / ths_hotspot → IWENCAI_COOKIE
     
     Args:
         ds_type: 数据源类型（如 'tushare', 'finnhub'）
@@ -120,6 +121,8 @@ def get_env_api_key_for_datasource(ds_type: str) -> Optional[str]:
         "iex": "IEX_API_KEY",
         "quandl": "QUANDL_API_KEY",
         "alphavantage": "ALPHAVANTAGE_API_KEY",
+        "iwencai": "IWENCAI_COOKIE",
+        "ths_hotspot": "IWENCAI_COOKIE",
     }
     
     env_key_name = env_key_map.get(ds_type.lower())
@@ -162,4 +165,3 @@ def should_skip_api_key_update(api_key: Optional[str]) -> bool:
         return True
     
     return False
-

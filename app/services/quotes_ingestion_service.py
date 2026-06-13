@@ -19,8 +19,8 @@ class QuotesIngestionService:
 
     核心特性：
     - 调度频率：由 settings.QUOTES_INGEST_INTERVAL_SECONDS 控制（默认360秒=6分钟）
-    - 接口轮换：Tushare → AKShare东方财富 → AKShare新浪财经（避免单一接口被限流）
-    - 智能限流：Tushare免费用户每小时最多2次，付费用户自动切换到高频模式（5秒）
+    - 接口轮换：默认仅使用 external_quotes (Tencent/mootdx)
+    - 低风险通道：不再高频调用 AKShare/东财行情接口
     - 休市时间：跳过任务，保持上次收盘数据；必要时执行一次性兜底补数
     - 字段：code(6位)、close、pct_chg、amount、open、high、low、pre_close、trade_date、updated_at
     """
@@ -32,7 +32,7 @@ class QuotesIngestionService:
         self.status_collection_name = "quotes_ingestion_status"  # 状态记录集合
         self.tz = ZoneInfo(settings.TIMEZONE)
 
-        # Tushare 权限检测相关属性
+        # 历史兼容字段：旧 Tushare 权限检测分支已不在默认采集路径中使用。
         self._tushare_permission_checked = False  # 是否已检测过权限
         self._tushare_has_premium = False  # 是否有付费权限
         self._tushare_last_call_time = None  # 上次调用时间（用于免费用户限流）
@@ -40,8 +40,8 @@ class QuotesIngestionService:
         self._tushare_call_count = 0  # 当前小时内调用次数
         self._tushare_call_times = deque()  # 记录调用时间的队列（用于限流）
 
-        # 接口轮换相关属性
-        self._rotation_sources = ["tushare", "akshare_eastmoney", "akshare_sina"]
+        # 行情层仅使用 Tencent/mootdx 外部增强通道，避免高频触发 AKShare/东财行情接口。
+        self._rotation_sources = ["external_quotes"]
         self._rotation_index = 0  # 当前轮换索引
 
     @staticmethod
@@ -292,25 +292,20 @@ class QuotesIngestionService:
 
         Returns:
             (source_type, akshare_api):
-                - source_type: "tushare" | "akshare"
-                - akshare_api: "eastmoney" | "sina" (仅当 source_type="akshare" 时有效)
+                - source_type: "external_quotes"
+                - akshare_api: 始终为 None
         """
         if not settings.QUOTES_ROTATION_ENABLED:
-            # 未启用轮换，使用默认优先级
-            return "tushare", None
+            # 未启用轮换时仍使用低风险外部行情通道
+            return "external_quotes", None
 
-        # 轮换逻辑：0=Tushare, 1=AKShare东方财富, 2=AKShare新浪财经
+        # 轮换逻辑：默认只有外部增强行情
         current_source = self._rotation_sources[self._rotation_index]
 
         # 更新轮换索引（下次使用下一个接口）
         self._rotation_index = (self._rotation_index + 1) % len(self._rotation_sources)
 
-        if current_source == "tushare":
-            return "tushare", None
-        elif current_source == "akshare_eastmoney":
-            return "akshare", "eastmoney"
-        else:  # akshare_sina
-            return "akshare", "sina"
+        return current_source, None
 
     def _is_trading_time(self, now: Optional[datetime] = None) -> bool:
         """
@@ -539,69 +534,58 @@ class QuotesIngestionService:
         从指定数据源获取行情
 
         Args:
-            source_type: "tushare" | "akshare"
-            akshare_api: "eastmoney" | "sina" (仅当 source_type="akshare" 时有效)
+            source_type: "external_quotes"
+            akshare_api: 兼容旧签名，当前忽略
 
         Returns:
             (quotes_map, source_name)
         """
         try:
-            if source_type == "tushare":
-                # 检查是否可以调用 Tushare
-                if not self._can_call_tushare():
+            if source_type == "external_quotes":
+                codes = self._load_stock_codes_from_cache()
+                if not codes:
+                    logger.warning("本地 stock_basic_info 无代码列表，跳过外部增强行情")
                     return None, None
 
-                from app.services.data_sources.tushare_adapter import TushareAdapter
-                adapter = TushareAdapter()
+                from app.services.china_external_data_service import ChinaQuoteService
 
-                if not adapter.is_available():
-                    logger.warning("Tushare 不可用")
-                    return None, None
-
-                logger.info("📊 使用 Tushare rt_k 接口获取实时行情")
-                quotes_map = adapter.get_realtime_quotes()
-
+                logger.info(f"📊 使用 Tencent/mootdx 获取实时行情，代码数={len(codes)}")
+                quotes_map = ChinaQuoteService().get_quotes(codes)
                 if quotes_map:
-                    self._record_tushare_call()
-                    return quotes_map, "tushare"
-                else:
-                    logger.warning("Tushare rt_k 返回空数据")
-                    return None, None
-
-            elif source_type == "akshare":
-                from app.services.data_sources.akshare_adapter import AKShareAdapter
-                adapter = AKShareAdapter()
-
-                if not adapter.is_available():
-                    logger.warning("AKShare 不可用")
-                    return None, None
-
-                api_name = akshare_api or "eastmoney"
-                logger.info(f"📊 使用 AKShare {api_name} 接口获取实时行情")
-                quotes_map = adapter.get_realtime_quotes(source=api_name)
-
-                if quotes_map:
-                    return quotes_map, f"akshare_{api_name}"
-                else:
-                    logger.warning(f"AKShare {api_name} 返回空数据")
-                    return None, None
-
-            else:
-                logger.error(f"未知数据源类型: {source_type}")
+                    return quotes_map, "external_quotes"
+                logger.warning("Tencent/mootdx 外部增强行情返回空数据")
                 return None, None
+
+            logger.error(f"未知或已禁用的行情数据源类型: {source_type}")
+            return None, None
 
         except Exception as e:
             logger.error(f"从 {source_type} 获取行情失败: {e}")
             return None, None
+
+    def _load_stock_codes_from_cache(self) -> List[str]:
+        try:
+            from app.core.database import get_mongo_db_sync
+
+            db = get_mongo_db_sync()
+            cursor = db.stock_basic_info.find({}, {"_id": 0, "code": 1, "symbol": 1})
+            codes = []
+            for doc in cursor:
+                code = str(doc.get("code") or doc.get("symbol") or "").strip()
+                if code:
+                    codes.append(self._normalize_stock_code(code))
+            return sorted({code for code in codes if code})
+        except Exception as exc:
+            logger.warning(f"读取本地股票代码列表失败: {exc}")
+            return []
 
     async def run_once(self) -> None:
         """
         执行一次采集与入库
 
         核心逻辑：
-        1. 检测 Tushare 权限（首次运行）
-        2. 按轮换顺序尝试获取行情：Tushare → AKShare东方财富 → AKShare新浪财经
-        3. 任意一个接口成功即入库，失败则跳过本次采集
+        1. 按轮换顺序尝试获取行情：external_quotes (Tencent/mootdx)
+        2. 接口成功即入库，失败则跳过本次采集
         """
         # 非交易时段处理
         if not self._is_trading_time():
@@ -612,21 +596,6 @@ class QuotesIngestionService:
             return
 
         try:
-            # 首次运行：检测 Tushare 权限
-            if settings.QUOTES_AUTO_DETECT_TUSHARE_PERMISSION and not self._tushare_permission_checked:
-                logger.info("🔍 首次运行，检测 Tushare rt_k 接口权限...")
-                has_premium = self._check_tushare_permission()
-
-                if has_premium:
-                    logger.info(
-                        "✅ 检测到 Tushare 付费权限！建议将 QUOTES_INGEST_INTERVAL_SECONDS 设置为 5-60 秒以充分利用权限"
-                    )
-                else:
-                    logger.info(
-                        f"ℹ️ Tushare 免费用户，每小时最多调用 {self._tushare_hourly_limit} 次 rt_k 接口。"
-                        f"当前采集间隔: {settings.QUOTES_INGEST_INTERVAL_SECONDS} 秒"
-                    )
-
             # 获取下一个数据源
             source_type, akshare_api = self._get_next_source()
 
@@ -671,4 +640,3 @@ class QuotesIngestionService:
                 records_count=0,
                 error_msg=str(e)
             )
-

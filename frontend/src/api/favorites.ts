@@ -15,6 +15,15 @@ export interface FavoriteItem {
   current_price?: number | null
   change_percent?: number | null
   volume?: number | null
+  pe_ttm?: number | null
+  pb?: number | null
+  total_mv?: number | null
+  float_mv?: number | null
+  turnover_rate?: number | null
+  limit_up?: number | null
+  limit_down?: number | null
+  quote_source?: string | null
+  data_sources?: Record<string, string>
 }
 
 export interface AddFavoriteReq {
@@ -67,9 +76,9 @@ export const favoritesApi = {
 
   /**
    * 同步自选股实时行情
-   * @param data_source 数据源（tushare/akshare）
+   * @param data_source 固定为 external_quotes (Tencent/mootdx)
    */
-  syncRealtime: (data_source: string = 'tushare') =>
+  syncRealtime: (data_source: string = 'external_quotes') =>
     ApiClient.post<{
       total: number
       success_count: number
@@ -77,6 +86,19 @@ export const favoritesApi = {
       symbols: string[]
       data_source: string
       message: string
-    }>('/api/favorites/sync-realtime', { data_source })
-}
+    }>('/api/favorites/sync-realtime', { data_source }),
 
+  /**
+   * 使用最新七模块补全自选股信息
+   */
+  enrichLatestSources: () =>
+    ApiClient.post<{
+      total: number
+      success_count: number
+      failed_count: number
+      symbols: string[]
+      failed_symbols?: string[]
+      data_source: string
+      message: string
+    }>('/api/favorites/enrich-latest-sources', {})
+}
