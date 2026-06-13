@@ -290,6 +290,18 @@ class Settings(BaseSettings):
     CNINFO_ANNOUNCEMENTS_ENABLED: bool = Field(default=True, description="启用巨潮公告")
     CHINA_DATA_HTTP_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=30, description="中国外部数据源HTTP超时秒数")
 
+    # 自选股数据源特色快照与定时分析
+    FAVORITE_FEATURE_DATA_REFRESH_ENABLED: bool = Field(default=True, description="启用自选股数据源特色快照定时刷新")
+    FAVORITE_FEATURE_DATA_REFRESH_CRON: str = Field(default="5 7 * * *", description="自选股数据源特色快照刷新CRON，默认每天07:05")
+    FAVORITE_WEEKLY_ANALYSIS_ENABLED: bool = Field(default=True, description="启用自选股周五定时分析")
+    FAVORITE_WEEKLY_ANALYSIS_CRON: str = Field(default="0 19 * * 5", description="自选股周五定时分析CRON，默认每周五19:00")
+    FAVORITE_WEEKLY_QUICK_ANALYSIS_MODEL: str = Field(default="quern-flash", description="自选股定时分析快速分析模型")
+    FAVORITE_WEEKLY_DEEP_ANALYSIS_MODEL: str = Field(default="qwen-plus", description="自选股定时分析深度决策模型")
+    FAVORITE_WEEKLY_POSITIVE_SIDE_MODEL: str = Field(default="qwen-max", description="自选股定时分析辩论正方模型")
+    FAVORITE_WEEKLY_NEGATIVE_SIDE_MODEL: str = Field(default="deepseek-v4-pro", description="自选股定时分析辩论反方模型")
+    FAVORITE_FEATURE_GLOBAL_TIMEOUT_SECONDS: int = Field(default=12, ge=3, le=120, description="自选股全局慢源刷新超时秒数")
+    FAVORITE_FEATURE_STOCK_OPTIONAL_TIMEOUT_SECONDS: int = Field(default=20, ge=5, le=180, description="单只自选股慢源刷新超时秒数")
+
     # ==================== 分析师数据获取配置 ====================
 
     # 市场分析师数据范围配置

@@ -40,6 +40,7 @@ from app.routers import scheduler as scheduler_router
 from app.services.basics_sync_service import get_basics_sync_service
 from app.services.multi_source_basics_sync_service import MultiSourceBasicsSyncService
 from app.services.scheduler_service import set_scheduler_instance
+from app.services.favorite_stock_data_service import favorite_stock_data_service
 from app.worker.tushare_sync_service import (
     run_tushare_basic_info_sync,
     run_tushare_quotes_sync,
@@ -577,6 +578,59 @@ async def lifespan(app: FastAPI):
             logger.info(f"⏸️ 新闻数据同步已添加但暂停: {settings.NEWS_SYNC_CRON}")
         else:
             logger.info(f"📰 新闻数据同步已配置（仅自选股）: {settings.NEWS_SYNC_CRON}")
+
+        async def run_favorite_feature_data_refresh():
+            """刷新所有自选股的数据源特色快照。"""
+            try:
+                logger.info("📌 开始刷新自选股数据源特色快照...")
+                result = await favorite_stock_data_service.refresh_all_favorite_stock_data()
+                logger.info(
+                    "✅ 自选股数据源特色快照刷新完成: 用户%s个, 股票%s只, 成功%s只, 失败%s只",
+                    result.get("users", 0),
+                    result.get("stocks", 0),
+                    result.get("success_count", 0),
+                    result.get("failed_count", 0),
+                )
+            except Exception as e:
+                logger.error(f"❌ 自选股数据源特色快照刷新失败: {e}", exc_info=True)
+
+        scheduler.add_job(
+            run_favorite_feature_data_refresh,
+            CronTrigger.from_crontab(settings.FAVORITE_FEATURE_DATA_REFRESH_CRON, timezone=settings.TIMEZONE),
+            id="favorite_feature_data_refresh",
+            name="自选股数据源特色快照刷新"
+        )
+        if not settings.FAVORITE_FEATURE_DATA_REFRESH_ENABLED:
+            scheduler.pause_job("favorite_feature_data_refresh")
+            logger.info(f"⏸️ 自选股数据源特色快照刷新已添加但暂停: {settings.FAVORITE_FEATURE_DATA_REFRESH_CRON}")
+        else:
+            logger.info(f"📌 自选股数据源特色快照刷新已配置: {settings.FAVORITE_FEATURE_DATA_REFRESH_CRON}")
+
+        async def run_favorite_weekly_analysis():
+            """每周五晚间批量发起自选股分析报告生成。"""
+            try:
+                logger.info("🧠 开始提交自选股周五定时分析任务...")
+                result = await favorite_stock_data_service.run_weekly_favorite_analysis()
+                logger.info(
+                    "✅ 自选股周五定时分析提交完成: 用户%s个, 批次%s个, 股票%s只",
+                    result.get("users", 0),
+                    result.get("batches", 0),
+                    result.get("symbols", 0),
+                )
+            except Exception as e:
+                logger.error(f"❌ 自选股周五定时分析提交失败: {e}", exc_info=True)
+
+        scheduler.add_job(
+            run_favorite_weekly_analysis,
+            CronTrigger.from_crontab(settings.FAVORITE_WEEKLY_ANALYSIS_CRON, timezone=settings.TIMEZONE),
+            id="favorite_weekly_analysis",
+            name="自选股周五定时分析"
+        )
+        if not settings.FAVORITE_WEEKLY_ANALYSIS_ENABLED:
+            scheduler.pause_job("favorite_weekly_analysis")
+            logger.info(f"⏸️ 自选股周五定时分析已添加但暂停: {settings.FAVORITE_WEEKLY_ANALYSIS_CRON}")
+        else:
+            logger.info(f"🧠 自选股周五定时分析已配置: {settings.FAVORITE_WEEKLY_ANALYSIS_CRON}")
 
         scheduler.start()
 

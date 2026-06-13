@@ -598,6 +598,151 @@ def _format_shareholders(title: str, data: Dict[str, Any]) -> str:
     )
 
 
+def _latest_datasource_snapshot(db, code6: str) -> Dict[str, Any]:
+    try:
+        doc = db["favorite_stock_data_snapshots"].find_one(
+            {"code": code6},
+            {"_id": 0},
+            sort=[("refreshed_at", -1)],
+        )
+        return doc or {}
+    except Exception as exc:
+        logger.warning("读取自选股数据源快照失败 %s: %s", code6, exc)
+        return {}
+
+
+def _fmt_time(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "-")
+
+
+def _format_datasource_features(snapshot: Dict[str, Any]) -> str:
+    if not snapshot:
+        return "## 数据源特色快照\n- 暂无可用数据。"
+
+    compact = snapshot.get("compact") or {}
+    quote = compact.get("quote") or snapshot.get("quote") or {}
+    metrics = compact.get("tencent_metrics") or {}
+    deep = compact.get("mootdx_deep") or {}
+    report_summary = compact.get("research_reports") or {}
+    latest_report = report_summary.get("latest") or {}
+    news_summary = compact.get("news") or {}
+    latest_news = news_summary.get("latest_stock_news") or {}
+    announcements = compact.get("announcements") or {}
+    latest_announcement = announcements.get("latest") or {}
+    data_sources = compact.get("data_sources") or {}
+
+    lines = [
+        "## 数据源特色快照",
+        f"- 快照时间: {_fmt_time(snapshot.get('refreshed_at'))}",
+        f"- 数据源覆盖: {', '.join(f'{key}={value}' for key, value in data_sources.items()) or '-'}",
+        (
+            "- 实时行情: "
+            f"价格={_fmt_number(quote.get('price') or quote.get('close'))}，"
+            f"涨跌幅={_fmt_percent(quote.get('pct_chg'))}，"
+            f"成交额={_fmt_yi(quote.get('amount'))}，"
+            f"日期={quote.get('trade_date') or '-'}，来源={quote.get('source') or '-'}"
+        ),
+        (
+            "- 腾讯指标: "
+            f"PE(TTM)={_fmt_number(metrics.get('pe_ttm'))}，"
+            f"PB={_fmt_number(metrics.get('pb'))}，"
+            f"总市值={_fmt_yi(metrics.get('total_mv'))}，"
+            f"流通市值={_fmt_yi(metrics.get('float_mv'))}，"
+            f"换手率={_fmt_percent(metrics.get('turnover_rate'))}，"
+            f"振幅={_fmt_percent(metrics.get('amplitude'))}"
+        ),
+        (
+            "- mootdx深行情: "
+            f"盘口快照={deep.get('order_book_count', 0)}，"
+            f"逐笔成交={deep.get('transactions_count', 0)}，"
+            f"finance字段={deep.get('finance_fields', 0)}，"
+            f"F10={', '.join(deep.get('f10_categories') or []) or '-'}"
+        ),
+        (
+            "- 研报/EPS: "
+            f"研报数={report_summary.get('count', 0)}，"
+            f"最新={latest_report.get('publish_date') or '-'} "
+            f"{latest_report.get('institution') or '-'}《{latest_report.get('title') or '-'}》，"
+            f"评级={latest_report.get('rating') or '-'}，"
+            f"EPS预测={report_summary.get('eps_forecast') or '-'}"
+        ),
+        f"- 题材tags: {', '.join(compact.get('theme_tags') or []) or '-'}",
+        (
+            "- 新闻三件套: "
+            f"个股新闻={news_summary.get('stock_news_count', 0)}，"
+            f"财联社快讯={news_summary.get('cls_flash_count', 0)}，"
+            f"全球资讯={news_summary.get('global_news_count', 0)}，"
+            f"最新个股新闻={latest_news.get('publish_time') or '-'} {latest_news.get('title') or '-'}"
+        ),
+        (
+            "- 巨潮公告: "
+            f"公告数={announcements.get('count', 0)}，"
+            f"最新={latest_announcement.get('publish_date') or '-'} {latest_announcement.get('title') or '-'}"
+        ),
+        (
+            "- 股东数据: "
+            f"前十大={((compact.get('shareholders') or {}).get('top10_count') or 0)}，"
+            f"前十大流通={((compact.get('shareholders') or {}).get('float_top10_count') or 0)}，"
+            f"来源={((compact.get('shareholders') or {}).get('data_source') or '-')}"
+        ),
+    ]
+
+    hotspots = compact.get("hotspots") or []
+    if hotspots:
+        hotspot_rows = [
+            [
+                str(item.get("name") or item.get("symbol") or "-"),
+                ", ".join(item.get("tags") or [])[:32] or "-",
+                str(item.get("reason") or "-")[:48],
+            ]
+            for item in hotspots[:5]
+        ]
+        lines.extend(["", "### 同花顺热点归因", _compact_table(["名称", "题材", "归因"], hotspot_rows)])
+
+    reports = snapshot.get("research_reports") or []
+    if reports:
+        report_rows = [
+            [
+                str(row.get("publish_date") or "-"),
+                str(row.get("institution") or "-")[:16],
+                str(row.get("rating") or "-"),
+                str(row.get("title") or "-")[:42],
+            ]
+            for row in reports[:5]
+        ]
+        lines.extend(["", "### 最近研报", _compact_table(["日期", "机构", "评级", "标题"], report_rows)])
+
+    source_status = snapshot.get("source_status") or compact.get("source_status") or {}
+    failed = [
+        f"{key}: {value.get('error') or value.get('reason') or '不可用'}"
+        for key, value in source_status.items()
+        if isinstance(value, dict) and not value.get("ok", False)
+    ]
+    if failed:
+        lines.extend(["", "### 暂不可用数据源", "\n".join(f"- {item}" for item in failed[:8])])
+
+    return "\n".join(lines)
+
+
+def get_stock_datasource_feature_context(ticker: str) -> str:
+    """Return latest connected-source feature snapshot for favorite A-shares."""
+    code6 = normalize_code6(ticker)
+    if not _is_supported_a_share(code6):
+        return ""
+
+    db = _get_sync_db()
+    if db is None:
+        return ""
+
+    try:
+        return "\n\n".join(["# 自选股数据源特色数据", _format_datasource_features(_latest_datasource_snapshot(db, code6))]).strip()
+    except Exception as exc:
+        logger.warning("获取自选股数据源特色数据失败: %s", exc)
+        return ""
+
+
 def get_stock_fundamental_detail_context(ticker: str, periods: int = 40) -> str:
     """Return compact shareholder, financial and industry context for A-share analysis."""
     code6 = normalize_code6(ticker)
@@ -613,9 +758,11 @@ def get_stock_fundamental_detail_context(ticker: str, periods: int = 40) -> str:
         industry = _get_industry_comparison(db, code6)
         top10 = _get_shareholders(db, code6, scope="top10", periods=4)
         float_top10 = _get_shareholders(db, code6, scope="float_top10", periods=4)
+        datasource_features = _format_datasource_features(_latest_datasource_snapshot(db, code6))
 
         sections = [
             "# 股票深度基本面数据",
+            datasource_features,
             _format_financial_detail(financial),
             _format_industry_comparison(industry),
             _format_shareholders("前十大股东", top10),

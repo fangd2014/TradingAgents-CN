@@ -113,6 +113,8 @@ class FavoritesService:
             "quote_source": favorite.get("quote_source"),
             "enriched_at": favorite.get("enriched_at"),
             "data_sources": favorite.get("data_sources", {}),
+            "source_data": favorite.get("source_data", {}),
+            "source_data_refreshed_at": favorite.get("source_data_refreshed_at"),
             # 行情占位，稍后填充
             "current_price": None,
             "change_percent": None,
@@ -237,6 +239,32 @@ class FavoritesService:
                                 it[field] = q.get(field)
             except Exception:
                 # 查询失败时保持占位 None，避免影响基础功能
+                pass
+
+        # 批量补充数据源特色快照摘要。优先使用条目内嵌 source_data；
+        # 旧条目没有回写时，从最新快照集合读取。
+        if codes:
+            try:
+                snapshot_coll = db["favorite_stock_data_snapshots"]
+                cursor = snapshot_coll.find(
+                    {"user_id": user_id, "code": {"$in": codes}},
+                    {"_id": 0, "code": 1, "compact": 1, "refreshed_at": 1},
+                )
+                snapshots = await cursor.to_list(length=None)
+                snapshot_map = {str(doc.get("code")).zfill(6): doc for doc in (snapshots or [])}
+                for it in items:
+                    code = it.get("stock_code")
+                    if it.get("source_data"):
+                        continue
+                    snapshot = snapshot_map.get(code)
+                    if not snapshot:
+                        continue
+                    it["source_data"] = snapshot.get("compact") or {}
+                    refreshed_at = snapshot.get("refreshed_at")
+                    if isinstance(refreshed_at, datetime):
+                        refreshed_at = refreshed_at.isoformat()
+                    it["source_data_refreshed_at"] = refreshed_at
+            except Exception:
                 pass
 
         return items

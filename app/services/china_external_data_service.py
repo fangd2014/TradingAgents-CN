@@ -123,9 +123,8 @@ class ChinaQuoteService:
             client = Quotes.factory(market="std")
             result: Dict[str, Dict[str, Any]] = {}
             for code in codes:
-                market = 1 if code.startswith(("60", "68", "90")) else 0
                 try:
-                    df = client.quotes([(market, code)])
+                    df = client.quotes([code])
                 except Exception as exc:
                     logger.debug("mootdx quote failed for %s: %s", code, exc)
                     continue
@@ -188,7 +187,7 @@ class MootdxDeepMarketService:
         if not code:
             return []
         try:
-            df = self._client().quotes([(_market_id(code), code)])
+            df = self._client().quotes([code])
             return _df_records(df, 1)
         except Exception as exc:
             logger.warning("mootdx order book failed for %s: %s", code, exc)
