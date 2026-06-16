@@ -34,6 +34,7 @@ class DataSourceCode(str, Enum):
     EXTERNAL_QUOTES = "external_quotes"  # Tencent/mootdx 行情聚合
     MOOTDX = "mootdx"        # mootdx - 通达信深行情
     TENCENT_FINANCE = "tencent_finance"  # 腾讯财经行情指标
+    IFIND = "ifind"          # 同花顺 iFinD QuantAPI
     EASTMONEY_REPORTAPI = "eastmoney_reportapi"  # 东方财富研报
     IWENCAI = "iwencai"      # i问财语义搜索
     THS_HOTSPOT = "ths_hotspot"  # 同花顺热点归因
@@ -175,6 +176,20 @@ DATA_SOURCE_REGISTRY: Dict[str, DataSourceInfo] = {
         requires_api_key=False,
         is_free=True,
         features=["实时行情", "PE/PB", "市值", "换手率", "涨跌停价"],
+    ),
+
+    DataSourceCode.IFIND: DataSourceInfo(
+        code=DataSourceCode.IFIND,
+        name="ifind",
+        display_name="同花顺 iFinD",
+        provider="THS iFinD QuantAPI",
+        description="同花顺 iFinD 专业数据源，通过 iFinDPy 登录账号密码，补充基础资料、财务估值、概念题材等特色字段。",
+        supported_markets=["a_shares"],
+        requires_api_key=True,
+        is_free=False,
+        official_website="https://quantapi.51ifind.com/",
+        documentation_url="https://quantapi.51ifind.com/gwstatic/static/ds_web/super-command-web/index.html#/BasicData",
+        features=["基本资料", "财务估值", "概念题材", "行情序列", "自然语言问句"],
     ),
 
     DataSourceCode.EASTMONEY_REPORTAPI: DataSourceInfo(

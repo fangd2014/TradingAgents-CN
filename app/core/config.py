@@ -280,6 +280,19 @@ class Settings(BaseSettings):
     MOOTDX_DEEP_MARKET_ENABLED: bool = Field(default=True, description="启用mootdx深行情/K线/逐笔/F10/finance")
     TENCENT_FINANCE_ENABLED: bool = Field(default=True, description="启用腾讯财经行情增强")
     TENCENT_FINANCE_METRICS_ENABLED: bool = Field(default=True, description="启用腾讯财经PE/PB/市值/换手等指标")
+    IFIND_ENABLED: bool = Field(default=True, description="启用同花顺 iFinD QuantAPI 专业数据源")
+    IFIND_USERNAME: str = Field(default="", description="同花顺 iFinD 账号")
+    IFIND_PASSWORD: str = Field(default="", description="同花顺 iFinD 密码")
+    IFIND_BASIC_INDICATORS: str = Field(
+        default="ths_stock_short_name_stock;ths_industry_stock;ths_concept_plate;ths_pe_ttm_stock;ths_pb_stock;ths_total_mv_stock;ths_float_mv_stock",
+        description="iFinD THS_BD 指标串，建议从同花顺 SuperCommand 复制"
+    )
+    IFIND_BASIC_PARAMS: str = Field(default="", description="iFinD THS_BD 参数串")
+    IFIND_QUERY_TEMPLATES: str = Field(
+        default="{code} 所属概念 题材 热点归因\n{code} 财务摘要 估值 机构观点",
+        description="iFinD/同花顺问句模板，每行一个，支持 {code}"
+    )
+    IFIND_INCLUDE_QUERY: bool = Field(default=True, description="是否启用 iFinD 问句特色数据")
     EASTMONEY_RESEARCH_ENABLED: bool = Field(default=True, description="启用东方财富/AKShare研报数据")
     EASTMONEY_REPORTAPI_ENABLED: bool = Field(default=True, description="启用东方财富reportapi研报直连")
     IWENCAI_ENABLED: bool = Field(default=True, description="启用i问财语义搜索")

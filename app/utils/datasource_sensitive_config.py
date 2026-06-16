@@ -18,6 +18,15 @@ TUSHARE_WEB_COOKIE_ALIASES = (
 IWENCAI_COOKIE_ENV_KEY = "IWENCAI_COOKIE"
 TUSHARE_TOKEN_ENV_KEY = "TUSHARE_TOKEN"
 TUSHARE_API_URL_ENV_KEY = "TUSHARE_API_URL"
+IFIND_USERNAME_ENV_KEY = "IFIND_USERNAME"
+IFIND_PASSWORD_ENV_KEY = "IFIND_PASSWORD"
+
+IFIND_CONFIG_KEYS = (
+    "IFIND_BASIC_INDICATORS",
+    "IFIND_BASIC_PARAMS",
+    "IFIND_QUERY_TEMPLATES",
+    "IFIND_INCLUDE_QUERY",
+)
 
 
 def source_type_to_string(source_type: Any) -> str:
@@ -109,10 +118,21 @@ def bridge_sensitive_config_params_to_env(
     env: Optional[MutableMapping[str, str]] = None,
 ) -> int:
     """将可运行时使用的数据源敏感配置桥接到环境变量。"""
-    if source_type_to_string(source_type) != "tushare":
+    source = source_type_to_string(source_type)
+    if source not in {"tushare", "ifind"}:
         return 0
 
     params = normalize_sensitive_config_params(source_type, config_params)
+    if source == "ifind":
+        env = env if env is not None else os.environ
+        bridged = 0
+        for key in IFIND_CONFIG_KEYS:
+            value = _clean_sensitive_value(params.get(key))
+            if value:
+                env[key] = value
+                bridged += 1
+        return bridged
+
     cookie = _clean_sensitive_value(params.get(CANONICAL_TUSHARE_WEB_COOKIE_KEY))
     if not cookie or _should_preserve_sensitive_value(cookie):
         return 0
@@ -125,6 +145,7 @@ def bridge_sensitive_config_params_to_env(
 def bridge_datasource_credentials_to_env(
     source_type: Any,
     api_key: Optional[Any] = None,
+    api_secret: Optional[Any] = None,
     endpoint: Optional[Any] = None,
     env: Optional[MutableMapping[str, str]] = None,
 ) -> int:
@@ -141,6 +162,14 @@ def bridge_datasource_credentials_to_env(
         elif source in {"iwencai", "ths_hotspot"}:
             env[IWENCAI_COOKIE_ENV_KEY] = cleaned_api_key
             bridged += 1
+        elif source == "ifind":
+            env[IFIND_USERNAME_ENV_KEY] = cleaned_api_key
+            bridged += 1
+
+    cleaned_api_secret = _clean_sensitive_value(api_secret)
+    if source == "ifind" and cleaned_api_secret and not _should_preserve_sensitive_value(cleaned_api_secret):
+        env[IFIND_PASSWORD_ENV_KEY] = cleaned_api_secret
+        bridged += 1
 
     cleaned_endpoint = _clean_sensitive_value(endpoint)
     if source == "tushare" and cleaned_endpoint:

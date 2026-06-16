@@ -186,11 +186,20 @@ def bridge_config_to_env():
 
         for ds_config in data_source_configs:
             try:
+                if ds_config.type.value == "ifind":
+                    os.environ["IFIND_ENABLED"] = "true" if ds_config.enabled else "false"
+                    logger.info(f"  ✓ 桥接 IFIND_ENABLED: {os.environ['IFIND_ENABLED']}")
+                    bridged_count += 1
+            except Exception as e:
+                logger.warning(f"  ⚠️  桥接 iFinD 启用状态失败: {e}")
+
+            try:
                 from app.utils.datasource_sensitive_config import bridge_datasource_credentials_to_env
 
                 bridged_credentials = bridge_datasource_credentials_to_env(
                     ds_config.type,
                     ds_config.api_key,
+                    ds_config.api_secret,
                     ds_config.endpoint,
                 )
                 if bridged_credentials:

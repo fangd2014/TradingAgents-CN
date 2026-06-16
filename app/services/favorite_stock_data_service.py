@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import multiprocessing
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -26,6 +27,7 @@ from app.services.china_external_data_service import (
     ChinaQuoteService,
     ChinaResearchReportService,
     CninfoAnnouncementService,
+    IfindQuantApiService,
     MootdxDeepMarketService,
     THSHotspotService,
     ThemeTagService,
@@ -393,6 +395,7 @@ class FavoriteStockDataService:
         return {
             "stock_name": stock_name,
             "quote": quote_doc,
+            "ifind": optional.get("ifind") or {},
             "mootdx_deep": optional.get("mootdx_deep") or {},
             "research_reports": optional.get("research_reports") or [],
             "theme_tags": optional.get("theme_tags") or {},
@@ -411,6 +414,26 @@ class FavoriteStockDataService:
     ) -> Dict[str, Any]:
         status: Dict[str, Any] = {}
         compact: Dict[str, Any] = {"data_sources": {}}
+        ifind: Dict[str, Any] = {}
+        if str(os.getenv("IFIND_ENABLED", str(getattr(settings, "IFIND_ENABLED", True)))).strip().lower() not in {"0", "false", "no", "off", ""}:
+            try:
+                ifind = IfindQuantApiService().get_stock_features(code, limit=5)
+                status["ifind"] = {
+                    "ok": bool(ifind.get("available")),
+                    "reason": ifind.get("reason"),
+                    "basic_fields": len((ifind.get("basic_data") or {}).keys()),
+                    "query_count": len(ifind.get("queries") or []),
+                }
+                compact["ifind"] = {
+                    "available": bool(ifind.get("available")),
+                    "basic_data": ifind.get("basic_data") or {},
+                    "queries": ifind.get("queries") or [],
+                    "reason": ifind.get("reason"),
+                }
+                compact["data_sources"]["ifind"] = "ifind_quantapi"
+            except Exception as exc:
+                _source_error(status, "ifind", exc)
+
         mootdx = MootdxDeepMarketService()
         deep: Dict[str, Any] = {}
         if getattr(settings, "MOOTDX_DEEP_MARKET_ENABLED", True):
@@ -511,6 +534,7 @@ class FavoriteStockDataService:
 
         return {
             "mootdx_deep": deep,
+            "ifind": ifind,
             "research_reports": reports,
             "theme_tags": tags,
             "hotspots": _limit(matching_hotspots, 5),

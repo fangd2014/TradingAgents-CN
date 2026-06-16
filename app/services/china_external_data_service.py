@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 def _get_setting(name: str, default: Any) -> Any:
     return getattr(settings, name, default)
+
+
+def _env_or_setting(name: str, default: Any = "") -> Any:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    return _get_setting(name, default)
+
+
+def _bool_env_or_setting(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(_get_setting(name, default))
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 def _safe_text(value: Any) -> str:
@@ -530,6 +545,175 @@ class THSHotspotService:
         }
 
 
+class IfindQuantApiService:
+    """同花顺 iFinD QuantAPI facade via iFinDPy."""
+
+    def __init__(
+        self,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        indicators: Optional[str] = None,
+        params: Optional[str] = None,
+        query_templates: Optional[str] = None,
+        include_query: Optional[bool] = None,
+        ifind_module: Any = None,
+    ) -> None:
+        self.username = username if username is not None else _env_or_setting("IFIND_USERNAME", "")
+        self.password = password if password is not None else _env_or_setting("IFIND_PASSWORD", "")
+        self.indicators = indicators if indicators is not None else _env_or_setting("IFIND_BASIC_INDICATORS", "")
+        self.params = params if params is not None else _env_or_setting("IFIND_BASIC_PARAMS", "")
+        self.query_templates = query_templates if query_templates is not None else _env_or_setting("IFIND_QUERY_TEMPLATES", "")
+        self.include_query = _bool_env_or_setting("IFIND_INCLUDE_QUERY", True) if include_query is None else bool(include_query)
+        self.ifind_module = ifind_module
+
+    def get_stock_features(self, symbol: str, limit: int = 5) -> Dict[str, Any]:
+        code = _code6(symbol)
+        if not _bool_env_or_setting("IFIND_ENABLED", True):
+            return self._unavailable(code, "ifind disabled")
+        if not str(self.username or "").strip() or not str(self.password or "").strip():
+            return self._unavailable(code, "IFIND_USERNAME/IFIND_PASSWORD is not configured")
+
+        try:
+            module = self.ifind_module or self._import_ifind()
+        except ImportError:
+            return self._unavailable(code, "iFinDPy is not installed; install the iFinD QuantAPI Python package")
+
+        login_result = self._login(module)
+        if not self._is_success(login_result):
+            return self._unavailable(code, f"THS_iFinDLogin failed: {self._brief(login_result)}")
+
+        status: Dict[str, Any] = {"login": {"ok": True}}
+        basic: Dict[str, Any] = {}
+        if self.indicators:
+            try:
+                basic_result = getattr(module, "THS_BD")(self._ifind_code(code), self.indicators, self.params or "")
+                basic = self._normalize_result(basic_result, limit=limit)
+                status["basic_data"] = {"ok": True, "indicator_count": len([item for item in self.indicators.split(";") if item.strip()])}
+            except Exception as exc:
+                status["basic_data"] = {"ok": False, "error": str(exc)[:300]}
+
+        queries: List[Dict[str, Any]] = []
+        if self.include_query and self.query_templates:
+            query_fn = self._query_function(module)
+            if query_fn is None:
+                status["queries"] = {"ok": False, "error": "No iFinD query function found on iFinDPy module"}
+            else:
+                for template in self._query_template_lines()[:limit]:
+                    question = template.format(code=code, ifind_code=self._ifind_code(code))
+                    try:
+                        result = query_fn(question)
+                        queries.append({"query": question, "result": self._normalize_result(result, limit=limit)})
+                    except Exception as exc:
+                        queries.append({"query": question, "error": str(exc)[:300]})
+                status["queries"] = {"ok": True, "count": len(queries)}
+
+        return {
+            "available": True,
+            "symbol": code,
+            "ifind_code": self._ifind_code(code),
+            "source": "ifind_quantapi",
+            "basic_data": basic,
+            "queries": queries,
+            "status": status,
+            "as_of": datetime.utcnow().isoformat(),
+        }
+
+    def _import_ifind(self) -> Any:
+        import importlib
+
+        return importlib.import_module("iFinDPy")
+
+    def _login(self, module: Any) -> Any:
+        login = getattr(module, "THS_iFinDLogin")
+        return login(str(self.username).strip(), str(self.password).strip())
+
+    def _query_function(self, module: Any) -> Optional[Any]:
+        for name in ("THS_WC", "THS_Query", "THS_SmartQuery"):
+            fn = getattr(module, name, None)
+            if callable(fn):
+                return fn
+        return None
+
+    def _query_template_lines(self) -> List[str]:
+        lines: List[str] = []
+        for line in str(self.query_templates or "").replace("；", "\n").splitlines():
+            clean = line.strip()
+            if clean and clean not in lines:
+                lines.append(clean)
+        return lines
+
+    @staticmethod
+    def _ifind_code(code: str) -> str:
+        code6 = _code6(code)
+        if code6.startswith(("60", "68", "90")):
+            return f"{code6}.SH"
+        if code6.startswith(("43", "83", "87", "88", "92")):
+            return f"{code6}.BJ"
+        return f"{code6}.SZ"
+
+    def _normalize_result(self, payload: Any, limit: int = 5) -> Dict[str, Any]:
+        if payload is None:
+            return {"raw": None}
+        if isinstance(payload, pd.DataFrame):
+            return {"records": _df_records(payload, limit)}
+        if isinstance(payload, dict):
+            return {str(key): self._normalize_value(value, limit=limit) for key, value in payload.items()}
+
+        data = {}
+        for attr in ("errorcode", "errmsg", "data", "tables", "time", "codes", "indicators"):
+            if hasattr(payload, attr):
+                data[attr] = self._normalize_value(getattr(payload, attr), limit=limit)
+        if data:
+            return data
+        return {"raw": self._normalize_value(payload, limit=limit)}
+
+    def _normalize_value(self, value: Any, limit: int = 5) -> Any:
+        if isinstance(value, pd.DataFrame):
+            return _df_records(value, limit)
+        if isinstance(value, list):
+            return [self._normalize_value(item, limit=limit) for item in value[:limit]]
+        if isinstance(value, tuple):
+            return [self._normalize_value(item, limit=limit) for item in value[:limit]]
+        if isinstance(value, dict):
+            return {str(key): self._normalize_value(item, limit=limit) for key, item in value.items()}
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    @staticmethod
+    def _is_success(result: Any) -> bool:
+        if result in (0, "0", True):
+            return True
+        if isinstance(result, dict):
+            code = result.get("errorcode") or result.get("code")
+            return str(code) in {"0", "None", ""}
+        if hasattr(result, "errorcode"):
+            return str(getattr(result, "errorcode")) == "0"
+        return False
+
+    @staticmethod
+    def _brief(value: Any) -> str:
+        text = str(value)
+        return text[:300]
+
+    def _unavailable(self, code: str, reason: str) -> Dict[str, Any]:
+        return {
+            "available": False,
+            "symbol": code,
+            "ifind_code": self._ifind_code(code) if code else "",
+            "source": "ifind_quantapi",
+            "reason": reason,
+            "basic_data": {},
+            "queries": [],
+            "status": {"ifind": {"ok": False, "error": reason}},
+        }
+
+
 class AkshareNewsService:
     """AKShare news trio: Eastmoney stock news, CLS flash, and Eastmoney global news."""
 
@@ -661,6 +845,16 @@ def get_source_availability() -> List[Dict[str, Any]]:
             requires_registration=False,
             registration_url=None,
             reason="Uses public qt.gtimg.cn quote endpoint; no official SDK contract.",
+        ),
+        SourceAvailability(
+            name="ifind",
+            available=_bool_env_or_setting("IFIND_ENABLED", True)
+            and bool(_env_or_setting("IFIND_USERNAME", ""))
+            and bool(_env_or_setting("IFIND_PASSWORD", ""))
+            and _can_import("iFinDPy"),
+            requires_registration=True,
+            registration_url="https://quantapi.51ifind.com/gwstatic/static/ds_web/super-command-web/index.html#/BasicData",
+            reason="Requires a licensed THS iFinD account/password and the iFinDPy QuantAPI package.",
         ),
         SourceAvailability(
             name="eastmoney_reportapi",

@@ -3,6 +3,7 @@
 """
 
 import logging
+import os
 from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -190,11 +191,30 @@ def _bridge_datasource_runtime_config(ds_config: DataSourceConfig) -> None:
         bridge_datasource_credentials_to_env(
             ds_config.type,
             ds_config.api_key,
+            ds_config.api_secret,
             ds_config.endpoint,
         )
         bridge_sensitive_config_params_to_env(ds_config.type, ds_config.config_params)
+        if _datasource_type_text(ds_config.type) == "ifind":
+            os.environ["IFIND_ENABLED"] = "true" if ds_config.enabled else "false"
     except Exception as e:
         logger.warning(f"数据源运行时配置桥接失败: {e}")
+
+def _datasource_type_text(value: Any) -> str:
+    try:
+        if hasattr(value, "value"):
+            value = value.value
+    except Exception:
+        pass
+    return str(value or "").strip().lower()
+
+def _is_valid_ifind_credential(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if "..." in text or text.startswith("your_") or text.startswith("your-"):
+        return True
+    return len(text) >= 3
 
 def _sanitize_kv(d: Dict[str, Any]) -> Dict[str, Any]:
     """对字典中的可能敏感键进行脱敏（仅用于响应）。"""
@@ -805,11 +825,18 @@ async def add_data_source_config(
             logger.warning(f"数据源敏感扩展配置规范化失败: {e}")
 
         # 处理 API Key
+        ds_type_text = _datasource_type_text(_req.get("type"))
         if 'api_key' in _req:
             api_key = _req.get('api_key', '')
             # 如果是占位符或截断的密钥，清空该字段
             if should_skip_api_key_update(api_key):
                 _req['api_key'] = ""
+            elif ds_type_text == "ifind":
+                if not _is_valid_ifind_credential(api_key):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="IFIND_USERNAME 无效：请输入完整账号，或留空使用环境变量"
+                    )
             # 如果是空字符串，保留（表示使用环境变量）
             elif api_key == '':
                 _req['api_key'] = ''
@@ -826,6 +853,12 @@ async def add_data_source_config(
             api_secret = _req.get('api_secret', '')
             if should_skip_api_key_update(api_secret):
                 _req['api_secret'] = ""
+            elif ds_type_text == "ifind":
+                if not _is_valid_ifind_credential(api_secret):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="IFIND_PASSWORD 无效：请输入完整密码，或留空使用环境变量"
+                    )
             # 如果是空字符串，保留
             elif api_secret == '':
                 _req['api_secret'] = ''
@@ -1210,6 +1243,8 @@ async def update_data_source_config(
                 except Exception as e:
                     logger.warning(f"数据源敏感扩展配置合并失败: {e}")
 
+                ds_type_text = _datasource_type_text(_req.get("type"))
+
                 # 处理 API Key
                 if 'api_key' in _req:
                     api_key = _req.get('api_key')
@@ -1256,6 +1291,13 @@ async def update_data_source_config(
                     elif should_skip_api_key_update(api_key):
                         logger.info(f"⏭️  [API Key 验证] 跳过更新（占位符），保留原值")
                         _req['api_key'] = ds_config.api_key or ""
+                    elif ds_type_text == "ifind":
+                        if not _is_valid_ifind_credential(api_key):
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="IFIND_USERNAME 无效：请输入完整账号，或留空使用环境变量"
+                            )
+                        logger.info("✅ [IFIND_USERNAME 验证] 验证通过")
                     # 如果是新输入的密钥，必须验证有效性
                     elif not is_valid_api_key(api_key):
                         logger.error(f"❌ [API Key 验证] 验证失败，长度: {len(api_key)}")
@@ -1316,6 +1358,13 @@ async def update_data_source_config(
                     elif should_skip_api_key_update(api_secret):
                         logger.info(f"⏭️  [API Secret 验证] 跳过更新（占位符），保留原值")
                         _req['api_secret'] = ds_config.api_secret or ""
+                    elif ds_type_text == "ifind":
+                        if not _is_valid_ifind_credential(api_secret):
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="IFIND_PASSWORD 无效：请输入完整密码，或留空使用环境变量"
+                            )
+                        logger.info("✅ [IFIND_PASSWORD 验证] 验证通过")
                     # 如果是新输入的密钥，必须验证有效性
                     elif not is_valid_api_key(api_secret):
                         logger.error(f"❌ [API Secret 验证] 验证失败，长度: {len(api_secret)}")

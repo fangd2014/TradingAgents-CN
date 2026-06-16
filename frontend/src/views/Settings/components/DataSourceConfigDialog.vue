@@ -132,17 +132,53 @@
         </div>
       </el-form-item>
 
+      <template v-if="isIfindSource">
+        <el-form-item label="THS_BD指标串">
+          <el-input
+            v-model="formData.config_params.IFIND_BASIC_INDICATORS"
+            type="textarea"
+            :rows="3"
+            placeholder="从 iFinD SuperCommand 复制指标串，例如 ths_stock_short_name_stock;ths_industry_stock"
+            clearable
+          />
+          <div class="form-tip">
+            用于 THS_BD(code, indicators, params)，多个指标用英文分号分隔
+          </div>
+        </el-form-item>
+
+        <el-form-item label="THS_BD参数">
+          <el-input
+            v-model="formData.config_params.IFIND_BASIC_PARAMS"
+            placeholder="可选；从官方命令复制参数串"
+            clearable
+          />
+        </el-form-item>
+
+        <el-form-item label="同花顺问句">
+          <el-input
+            v-model="formData.config_params.IFIND_QUERY_TEMPLATES"
+            type="textarea"
+            :rows="4"
+            placeholder="{code} 所属概念 题材 热点归因"
+            clearable
+          />
+          <div class="form-tip">
+            每行一个问句模板，支持 {code} 和 {ifind_code}
+          </div>
+        </el-form-item>
+      </template>
+
       <!-- API Secret 输入框（某些数据源需要） -->
-      <el-form-item v-if="needsApiSecret" label="API Secret" prop="api_secret">
+      <el-form-item v-if="needsApiSecret" :label="apiSecretLabel" prop="api_secret">
         <el-input
           v-model="formData.api_secret"
           type="password"
-          placeholder="输入 API Secret（可选）"
+          :placeholder="apiSecretPlaceholder"
           show-password
           clearable
         />
         <div class="form-tip">
-          某些数据源（如 Alpha Vantage）需要额外的 Secret Key
+          {{ apiSecretTip }}
         </div>
       </el-form-item>
 
@@ -317,7 +353,7 @@ const isEdit = computed(() => !!props.config)
 const needsApiSecret = computed(() => {
   const type = formData.value.type?.toLowerCase() || ''
   // 某些数据源类型需要 API Secret
-  return ['alpha_vantage', 'wind', 'choice'].includes(type)
+  return ['alpha_vantage', 'wind', 'choice', 'ifind'].includes(type)
 })
 
 const isTushareSource = computed(() => {
@@ -328,27 +364,35 @@ const isIwencaiCookieSource = computed(() => {
   return ['iwencai', 'ths_hotspot'].includes((formData.value.type || '').toLowerCase())
 })
 
+const isIfindSource = computed(() => {
+  return (formData.value.type || '').toLowerCase() === 'ifind'
+})
+
 const endpointLabel = computed(() => {
   if (isTushareSource.value) return 'TUSHARE_API_URL'
   if (isIwencaiCookieSource.value) return '访问方式'
+  if (isIfindSource.value) return '访问方式'
   return 'API端点'
 })
 
 const endpointPlaceholder = computed(() => {
   if (isTushareSource.value) return 'http://api.tushare.pro'
   if (isIwencaiCookieSource.value) return 'pywencai://iwencai'
+  if (isIfindSource.value) return 'ifind://quantapi'
   return '请输入API端点URL'
 })
 
 const apiCredentialLabel = computed(() => {
   if (isTushareSource.value) return 'TUSHARE_TOKEN'
   if (isIwencaiCookieSource.value) return 'IWENCAI_COOKIE'
+  if (isIfindSource.value) return 'IFIND_USERNAME'
   return 'API Key'
 })
 
 const apiCredentialPlaceholder = computed(() => {
   if (isTushareSource.value) return '输入 TUSHARE_TOKEN（留空则使用环境变量）'
   if (isIwencaiCookieSource.value) return '登录 i问财网页后复制请求头 Cookie（留空则使用环境变量）'
+  if (isIfindSource.value) return '输入同花顺 iFinD 账号（留空则使用环境变量 IFIND_USERNAME）'
   return '输入 API Key（可选，留空则使用环境变量）'
 })
 
@@ -359,13 +403,31 @@ const apiCredentialTip = computed(() => {
   if (isIwencaiCookieSource.value) {
     return '标准访问方式：pywencai + 登录 Cookie。优先级：数据库 IWENCAI_COOKIE > 环境变量 IWENCAI_COOKIE'
   }
+  if (isIfindSource.value) {
+    return '标准访问方式：iFinDPy + iFinD账号密码。优先级：数据库 IFIND_USERNAME/IFIND_PASSWORD > 环境变量'
+  }
   return '优先级：数据库配置 > 环境变量。留空则使用 .env 文件中的配置'
+})
+
+const apiSecretLabel = computed(() => {
+  if (isIfindSource.value) return 'IFIND_PASSWORD'
+  return 'API Secret'
+})
+
+const apiSecretPlaceholder = computed(() => {
+  if (isIfindSource.value) return '输入同花顺 iFinD 密码（留空则使用环境变量 IFIND_PASSWORD）'
+  return '输入 API Secret（可选）'
+})
+
+const apiSecretTip = computed(() => {
+  if (isIfindSource.value) return '用于 iFinDPy 的 THS_iFinDLogin(username, password)'
+  return '某些数据源（如 Alpha Vantage）需要额外的 Secret Key'
 })
 
 const visibleConfigParamEntries = computed(() => {
   return paramKeys.value
     .map((key, index) => ({ key, index }))
-    .filter(param => param.key !== 'TUSHARE_WEB_COOKIE')
+    .filter(param => !['TUSHARE_WEB_COOKIE', 'IFIND_BASIC_INDICATORS', 'IFIND_BASIC_PARAMS', 'IFIND_QUERY_TEMPLATES', 'IFIND_INCLUDE_QUERY'].includes(param.key))
 })
 
 // 当前选中的数据源信息
@@ -452,6 +514,12 @@ const ensureConfigParams = () => {
   if (isTushareSource.value && formData.value.config_params.TUSHARE_WEB_COOKIE === undefined) {
     formData.value.config_params.TUSHARE_WEB_COOKIE = ''
   }
+  if (isIfindSource.value) {
+    formData.value.config_params.IFIND_BASIC_INDICATORS ||= 'ths_stock_short_name_stock;ths_industry_stock;ths_concept_plate;ths_pe_ttm_stock;ths_pb_stock;ths_total_mv_stock;ths_float_mv_stock'
+    formData.value.config_params.IFIND_BASIC_PARAMS ||= ''
+    formData.value.config_params.IFIND_QUERY_TEMPLATES ||= '{code} 所属概念 题材 热点归因\n{code} 财务摘要 估值 机构观点'
+    formData.value.config_params.IFIND_INCLUDE_QUERY ||= 'true'
+  }
   paramKeys.value = Object.keys(formData.value.config_params || {})
 }
 
@@ -521,6 +589,19 @@ const dataSourceTypes: DataSourceTypeOption[] = [
     priority: 90,
     rate_limit: 300,
     timeout: 5
+  },
+  {
+    label: '同花顺 iFinD',
+    value: 'ifind',
+    provider: 'THS iFinD QuantAPI',
+    default_endpoint: 'ifind://quantapi',
+    description: '同花顺 iFinD 专业数据源，使用 iFinDPy 登录账号密码，补充基础资料、财务估值、概念题材等特色字段。',
+    market_categories: ['a_shares'],
+    priority: 98,
+    rate_limit: 120,
+    timeout: 20,
+    register_url: 'https://quantapi.51ifind.com/gwstatic/static/ds_web/super-command-web/index.html#/BasicData',
+    register_guide: '需要同花顺 iFinD 授权账号；可在官方 SuperCommand 页面查询 THS_BD 指标并复制到配置中：'
   },
   {
     label: '东财研报',
@@ -682,7 +763,7 @@ const rules: FormRules = {
         }
 
         // 如果是新输入的密钥，必须长度 > 10
-        if (trimmedValue.length <= 10) {
+        if (!isIfindSource.value && trimmedValue.length <= 10) {
           callback(new Error('API Key 长度必须大于 10 个字符'))
           return
         }

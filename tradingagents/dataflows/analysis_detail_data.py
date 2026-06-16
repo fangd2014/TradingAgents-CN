@@ -624,6 +624,7 @@ def _format_datasource_features(snapshot: Dict[str, Any]) -> str:
     compact = snapshot.get("compact") or {}
     quote = compact.get("quote") or snapshot.get("quote") or {}
     metrics = compact.get("tencent_metrics") or {}
+    ifind = compact.get("ifind") or {}
     deep = compact.get("mootdx_deep") or {}
     report_summary = compact.get("research_reports") or {}
     latest_report = report_summary.get("latest") or {}
@@ -652,6 +653,13 @@ def _format_datasource_features(snapshot: Dict[str, Any]) -> str:
             f"流通市值={_fmt_yi(metrics.get('float_mv'))}，"
             f"换手率={_fmt_percent(metrics.get('turnover_rate'))}，"
             f"振幅={_fmt_percent(metrics.get('amplitude'))}"
+        ),
+        (
+            "- 同花顺iFinD: "
+            f"状态={'可用' if ifind.get('available') else '不可用'}，"
+            f"基础字段={len((ifind.get('basic_data') or {}).keys())}，"
+            f"问句数={len(ifind.get('queries') or [])}，"
+            f"原因={ifind.get('reason') or '-'}"
         ),
         (
             "- mootdx深行情: "
@@ -688,6 +696,20 @@ def _format_datasource_features(snapshot: Dict[str, Any]) -> str:
             f"来源={((compact.get('shareholders') or {}).get('data_source') or '-')}"
         ),
     ]
+
+    if ifind.get("basic_data"):
+        basic_text = str(ifind.get("basic_data"))[:600]
+        lines.extend(["", "### 同花顺 iFinD 基础/特色字段", f"- {basic_text}"])
+
+    if ifind.get("queries"):
+        query_rows = [
+            [
+                str(item.get("query") or "-")[:36],
+                str(item.get("error") or item.get("result") or "-")[:80],
+            ]
+            for item in (ifind.get("queries") or [])[:5]
+        ]
+        lines.extend(["", "### 同花顺 iFinD 问句结果", _compact_table(["问句", "结果"], query_rows)])
 
     hotspots = compact.get("hotspots") or []
     if hotspots:

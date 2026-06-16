@@ -163,6 +163,7 @@ class DataSourceType(str, Enum):
     BAOSTOCK = "baostock"
     MOOTDX = "mootdx"
     TENCENT_FINANCE = "tencent_finance"
+    IFIND = "ifind"
     EASTMONEY_REPORTAPI = "eastmoney_reportapi"
     IWENCAI = "iwencai"
     THS_HOTSPOT = "ths_hotspot"
@@ -272,6 +273,9 @@ class DataSourceConfig(BaseModel):
 def build_latest_china_data_source_configs(iwencai_cookie: str = "") -> List[DataSourceConfig]:
     """China data source defaults for low-risk A-share data paths."""
     iwencai_enabled = bool(str(iwencai_cookie or "").strip())
+    import os
+
+    ifind_enabled = bool(str(os.getenv("IFIND_USERNAME", "")).strip() and str(os.getenv("IFIND_PASSWORD", "")).strip())
     return [
         DataSourceConfig(
             name="External Quotes",
@@ -310,6 +314,25 @@ def build_latest_china_data_source_configs(iwencai_cookie: str = "") -> List[Dat
             display_name="mootdx深行情",
             provider="TongDaXin public servers",
             description="通达信TCP协议，提供深行情、K线、逐笔、finance和F10。",
+        ),
+        DataSourceConfig(
+            name="ifind",
+            type=DataSourceType.IFIND,
+            endpoint="ifind://quantapi",
+            timeout=20,
+            rate_limit=120,
+            enabled=ifind_enabled,
+            priority=98,
+            market_categories=["a_shares"],
+            display_name="同花顺 iFinD",
+            provider="THS iFinD QuantAPI",
+            description="同花顺 iFinD 专业数据源；通过 iFinDPy 登录账号密码，补充基本资料、估值财务、概念题材等特色字段。",
+            config_params={
+                "IFIND_BASIC_INDICATORS": "ths_stock_short_name_stock;ths_industry_stock;ths_concept_plate;ths_pe_ttm_stock;ths_pb_stock;ths_total_mv_stock;ths_float_mv_stock",
+                "IFIND_BASIC_PARAMS": "",
+                "IFIND_QUERY_TEMPLATES": "{code} 所属概念 题材 热点归因\n{code} 财务摘要 估值 机构观点",
+                "IFIND_INCLUDE_QUERY": "true",
+            },
         ),
         DataSourceConfig(
             name="tushare",

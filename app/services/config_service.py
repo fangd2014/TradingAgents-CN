@@ -68,6 +68,48 @@ class ConfigService:
 
         return normalize_provider_key(left_provider) == normalize_provider_key(right_provider)
 
+    @staticmethod
+    def _datasource_type_to_string(source_type: Any) -> str:
+        if hasattr(source_type, "value"):
+            source_type = source_type.value
+        return str(source_type or "").strip().lower()
+
+    async def _ensure_ifind_datasource_config(self, config: SystemConfig) -> SystemConfig:
+        """Append the iFinD datasource to older persisted system configs."""
+        has_ifind = any(
+            self._datasource_type_to_string(ds.type) == "ifind"
+            for ds in (config.data_source_configs or [])
+        )
+        if has_ifind:
+            return config
+
+        ifind_default = next(
+            (
+                ds for ds in build_latest_china_data_source_configs()
+                if self._datasource_type_to_string(ds.type) == "ifind"
+            ),
+            None,
+        )
+        if ifind_default is None:
+            return config
+
+        config.data_source_configs.append(ifind_default)
+        if await self.save_system_config(config):
+            for category_id in ifind_default.market_categories or []:
+                try:
+                    await self.add_datasource_to_category(
+                        DataSourceGrouping(
+                            data_source_name=ifind_default.name,
+                            market_category_id=category_id,
+                            priority=ifind_default.priority,
+                            enabled=ifind_default.enabled,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("iFinD 数据源分组补全失败: %s", exc)
+            logger.info("✅ 已为旧系统配置补充同花顺 iFinD 数据源")
+        return config
+
     # ==================== 市场分类管理 ====================
 
     async def get_market_categories(self) -> List[MarketCategory]:
@@ -402,7 +444,7 @@ class ConfigService:
 
             if config_data:
                 print(f"📊 从数据库获取配置，版本: {config_data.get('version', 0)}, LLM配置数量: {len(config_data.get('llm_configs', []))}")
-                return SystemConfig(**config_data)
+                return await self._ensure_ifind_datasource_config(SystemConfig(**config_data))
 
             # 如果没有配置，创建默认配置
             print("⚠️ 数据库中没有配置，创建默认配置")
@@ -1434,6 +1476,93 @@ class ConfigService:
                         "response_time": time.time() - start_time,
                         "details": None,
                     }
+
+            elif ds_type == "ifind":
+                username = str(api_key or "").strip()
+                password = str(getattr(ds_config, "api_secret", "") or "").strip()
+                credential_source = "配置"
+
+                if (not username) or ("..." in username) or (not password) or ("..." in password):
+                    import os
+
+                    system_config = await self.get_system_config()
+                    db_config = None
+                    if system_config:
+                        for ds in system_config.data_source_configs:
+                            if ds.name == ds_config.name or str(ds.type.value if hasattr(ds.type, "value") else ds.type) == "ifind":
+                                db_config = ds
+                                break
+                    if db_config:
+                        if (not username) or ("..." in username):
+                            username = db_config.api_key or username
+                        if (not password) or ("..." in password):
+                            password = db_config.api_secret or password
+                        credential_source = "数据库"
+
+                    if not username:
+                        username = os.getenv("IFIND_USERNAME", "").strip()
+                        if username:
+                            credential_source = "环境变量"
+                    if not password:
+                        password = os.getenv("IFIND_PASSWORD", "").strip()
+                        if password:
+                            credential_source = "环境变量"
+
+                if not username or not password:
+                    return {
+                        "success": False,
+                        "message": "需要配置同花顺 iFinD 账号和密码",
+                        "response_time": time.time() - start_time,
+                        "details": {
+                            "type": ds_type,
+                            "registration_url": "https://quantapi.51ifind.com/gwstatic/static/ds_web/super-command-web/index.html#/BasicData",
+                        },
+                    }
+
+                try:
+                    from app.services.china_external_data_service import IfindQuantApiService
+
+                    result = IfindQuantApiService(
+                        username=username,
+                        password=password,
+                        indicators=(ds_config.config_params or {}).get("IFIND_BASIC_INDICATORS"),
+                        params=(ds_config.config_params or {}).get("IFIND_BASIC_PARAMS"),
+                        query_templates="",
+                        include_query=False,
+                    ).get_stock_features("001309", limit=1)
+                except ImportError:
+                    return {
+                        "success": False,
+                        "message": "iFinD 账号已配置，但 iFinDPy 未安装或不可导入",
+                        "response_time": time.time() - start_time,
+                        "details": {"type": ds_type, "install": "安装同花顺 iFinD QuantAPI Python 包 iFinDPy"},
+                    }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "message": f"同花顺 iFinD 测试异常: {str(e)}",
+                        "response_time": time.time() - start_time,
+                        "details": {"type": ds_type},
+                    }
+
+                if not result.get("available"):
+                    return {
+                        "success": False,
+                        "message": f"同花顺 iFinD 测试失败: {result.get('reason') or '返回不可用'}",
+                        "response_time": time.time() - start_time,
+                        "details": {"type": ds_type, "credential_source": credential_source},
+                    }
+
+                return {
+                    "success": True,
+                    "message": f"同花顺 iFinD 连接成功（使用{credential_source}中的凭证）",
+                    "response_time": time.time() - start_time,
+                    "details": {
+                        "type": ds_type,
+                        "credential_source": credential_source,
+                        "test_result": "THS_iFinDLogin + 001309 THS_BD 成功",
+                    },
+                }
 
             elif ds_type == "eastmoney_reportapi":
                 return {
