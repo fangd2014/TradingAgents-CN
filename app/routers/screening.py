@@ -172,6 +172,22 @@ def _condition(field: str, op: str, value: Any) -> Dict[str, Any]:
     return {"field": field, "op": op, "value": value}
 
 
+def _sanitize_for_mongo_storage(value: Any) -> Any:
+    """Recursively replace Mongo-reserved field names before saving task results."""
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            if key.startswith("$"):
+                key = f"operator_{key[1:]}"
+            key = key.replace(".", "_")
+            sanitized[key] = _sanitize_for_mongo_storage(raw_value)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_for_mongo_storage(item) for item in value]
+    return value
+
+
 def _manual_task_parameters(req: ScreeningRequest) -> Dict[str, Any]:
     return {
         "market": req.market,
@@ -301,6 +317,18 @@ def _build_saved_screening_result(
 ) -> Dict[str, Any]:
     total = int(raw_result.get("total") or len(raw_result.get("items", [])))
     summary = f"选股完成，命中 {total} 只股票。"
+    screening_payload = _sanitize_for_mongo_storage(
+        {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_name,
+            "parameters": parameters,
+            "total": total,
+            "items": raw_result.get("items", []),
+            "trace": raw_result.get("trace"),
+            "description": raw_result.get("description", []),
+            "took_ms": raw_result.get("took_ms"),
+        }
+    )
     return {
         "type": "screening",
         "analysis_id": task_id,
@@ -321,16 +349,7 @@ def _build_saved_screening_result(
         "analysts": ["screening"],
         "research_depth": "选股",
         "reports": {},
-        "screening": {
-            "strategy_id": strategy_id,
-            "strategy_name": strategy_name,
-            "parameters": parameters,
-            "total": total,
-            "items": raw_result.get("items", []),
-            "trace": raw_result.get("trace"),
-            "description": raw_result.get("description", []),
-            "took_ms": raw_result.get("took_ms"),
-        },
+        "screening": screening_payload,
     }
 
 
