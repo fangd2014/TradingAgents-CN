@@ -48,6 +48,11 @@ DEFAULT_FLOAT_CAP_LIMIT = 500.0
 DEFAULT_MIN_TURNOVER_RATE = 5.0
 DEFAULT_MIN_FIVE_DAY_TURNOVER = DEFAULT_MIN_TURNOVER_RATE
 DEFAULT_VOLUME_BREAKOUT_MULTIPLIER = 4.0
+DEFAULT_RUBBING_BODY_RATIO = 0.15
+DEFAULT_RUBBING_LONG_SHADOW_RATIO = 0.50
+DEFAULT_RUBBING_SHORT_SHADOW_RATIO = 0.25
+DEFAULT_RUBBING_COMBINED_BODY_RATIO = 0.15
+DEFAULT_RUBBING_VOLUME_RATIO = 0.70
 PULLBACK_LOOKBACK_DAYS = 60
 PULLBACK_MIN_RATIO = 0.15
 SIDEWAYS_LOOKBACK_DAYS = 20
@@ -98,6 +103,46 @@ TREND_START_TRACE_STAGES = [
 
 TREND_START_STAGE_LABELS = {
     key: label for key, label, _ in TREND_START_TRACE_STAGES
+}
+
+PRESET_POSITIVE_RUBBING_LINE_DESCRIPTION = [
+    "扫描最近两根日K线：先出现倒T字线（长上影线），后出现T字线（长下影线）。",
+    "两根K线实体都必须很小，默认实体不超过当日振幅的15%。",
+    "倒T字线要求上影线足够长、下影线较短；T字线要求下影线足够长、上影线较短。",
+    "两根K线组合后的开收差很小，形态等效于一根十字线。",
+    "后一根K线成交量默认不高于其前5个交易日平均成交量的70%，体现缩量。",
+]
+
+RUBBING_LINE_TRACE_STAGES = [
+    (
+        "history_ready",
+        "日线数据充足",
+        "至少需要最近6根日K线，用于两日形态和最新K线此前5日均量计算。",
+    ),
+    (
+        "inverted_t",
+        "首日倒T字线",
+        "倒数第2根K线必须为小实体、长上影线、短下影线。",
+    ),
+    (
+        "t_line",
+        "次日T字线",
+        "最新K线必须为小实体、长下影线、短上影线。",
+    ),
+    (
+        "combined_doji",
+        "两日合成十字线",
+        "以首日开盘价和次日收盘价计算，合成实体必须很小。",
+    ),
+    (
+        "volume_shrink",
+        "缩量到5日均量7成",
+        "最新K线成交量不高于此前5个交易日均量的配置比例。",
+    ),
+]
+
+RUBBING_LINE_STAGE_LABELS = {
+    key: label for key, label, _ in RUBBING_LINE_TRACE_STAGES
 }
 
 
@@ -203,6 +248,103 @@ class PresetScreeningService:
             "trace": trace,
         }
 
+    async def run_positive_rubbing_line_preset(
+        self,
+        limit: int = 50,
+        candidate_limit: int = 1000,
+        industries: Optional[Sequence[str]] = None,
+        body_ratio: float = DEFAULT_RUBBING_BODY_RATIO,
+        long_shadow_ratio: float = DEFAULT_RUBBING_LONG_SHADOW_RATIO,
+        short_shadow_ratio: float = DEFAULT_RUBBING_SHORT_SHADOW_RATIO,
+        combined_body_ratio: float = DEFAULT_RUBBING_COMBINED_BODY_RATIO,
+        volume_ratio: float = DEFAULT_RUBBING_VOLUME_RATIO,
+    ) -> Dict[str, Any]:
+        """Scan for 缩量正揉搓线 in the latest two daily bars."""
+        start_time = datetime.now()
+        params = {
+            "body_ratio": body_ratio,
+            "long_shadow_ratio": long_shadow_ratio,
+            "short_shadow_ratio": short_shadow_ratio,
+            "combined_body_ratio": combined_body_ratio,
+            "volume_ratio": volume_ratio,
+        }
+        trace: Dict[str, Any] = {
+            "parameters": {
+                "limit": limit,
+                "candidate_limit": candidate_limit,
+                "industries": list(industries or []),
+                "industry_mode": "手动行业" if industries else "全部行业",
+                **params,
+            },
+            "steps": [],
+            "failure_reasons": {},
+            "sample_rejections": [],
+        }
+        candidates = await self._load_pattern_candidates(
+            candidate_limit=candidate_limit,
+            industries=industries,
+            trace=trace,
+        )
+
+        items: List[Dict[str, Any]] = []
+        stage_stats = self._create_stage_stats(RUBBING_LINE_TRACE_STAGES)
+        for candidate in candidates:
+            code = str(candidate.get("code") or "").zfill(6)
+            if not code:
+                continue
+            try:
+                history_result = await self._load_recent_daily_history(code, days=30, required_rows=6)
+                item, diagnostic = self._evaluate_positive_rubbing_line_candidate(
+                    candidate,
+                    history_result.data,
+                    params=params,
+                )
+                diagnostic["metrics"].update(
+                    {
+                        "history_source": history_result.source,
+                        "history_mongo_rows": history_result.mongo_rows,
+                        "history_tushare_rows": history_result.tushare_rows,
+                    }
+                )
+                if history_result.error:
+                    diagnostic["metrics"]["history_load_error"] = history_result.error
+                self._record_diagnostic(
+                    trace,
+                    stage_stats,
+                    diagnostic,
+                    stage_labels=RUBBING_LINE_STAGE_LABELS,
+                )
+                if item:
+                    items.append(item)
+            except Exception as exc:
+                logger.debug("缩量正揉搓线候选计算失败: %s %s", code, exc)
+                self._record_error(trace, candidate, exc)
+
+        items.sort(
+            key=lambda item: (
+                item.get("pattern_date") or "",
+                item.get("volume_shrink_ratio") is None,
+                -(item.get("volume_shrink_ratio") or 999),
+                item.get("amount") or 0,
+            ),
+            reverse=True,
+        )
+
+        elapsed_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        trace["steps"].extend(self._build_stage_steps(stage_stats, RUBBING_LINE_TRACE_STAGES))
+        trace["matched_count"] = len(items)
+        trace["returned_count"] = len(items[:limit])
+        trace["took_ms"] = elapsed_ms
+        return {
+            "preset": "positive_rubbing_line",
+            "title": "缩量正揉搓线",
+            "description": PRESET_POSITIVE_RUBBING_LINE_DESCRIPTION,
+            "total": len(items),
+            "items": items[:limit],
+            "took_ms": elapsed_ms,
+            "trace": trace,
+        }
+
     async def _load_candidates(
         self,
         candidate_limit: int,
@@ -287,6 +429,62 @@ class PresetScreeningService:
                     "details": {
                         "query": query,
                         "candidate_limit": candidate_limit,
+                        "limited_by_candidate_limit": matched_count > len(candidates),
+                    },
+                }
+        )
+        return candidates
+
+    async def _load_pattern_candidates(
+        self,
+        candidate_limit: int,
+        industries: Optional[Sequence[str]] = None,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        from app.core.database import get_mongo_db
+
+        db = get_mongo_db()
+        collection = db["stock_screening_view"]
+        base_query: Dict[str, Any] = {"close": {"$gt": 0}}
+        selected_industries = [industry for industry in (industries or []) if industry]
+        query: Dict[str, Any] = dict(base_query)
+        if selected_industries:
+            query = {"$and": [base_query, {"industry": {"$in": selected_industries}}]}
+
+        projection = {
+            "_id": 0,
+            "code": 1,
+            "name": 1,
+            "industry": 1,
+            "market": 1,
+            "board": 1,
+            "total_mv": 1,
+            "circ_mv": 1,
+            "close": 1,
+            "pct_chg": 1,
+            "amount": 1,
+            "turnover_rate": 1,
+            "turnover_rate_f": 1,
+            "volume_ratio": 1,
+            "source": 1,
+        }
+        matched_count = await collection.count_documents(query)
+        cursor = collection.find(query, projection).sort([("amount", -1)]).limit(candidate_limit)
+        candidates = await cursor.to_list(length=candidate_limit)
+        if trace is not None:
+            trace["steps"].append(
+                {
+                    "key": "candidate_pool",
+                    "label": "数据库候选池",
+                    "description": "从 stock_screening_view 取股价有效且符合行业范围的A股，按成交额倒序进入形态计算。",
+                    "checked": matched_count,
+                    "pass_count": len(candidates),
+                    "fail_count": max(matched_count - len(candidates), 0),
+                    "remaining_count": len(candidates),
+                    "details": {
+                        "query": query,
+                        "candidate_limit": candidate_limit,
+                        "industry_mode": "手动行业" if selected_industries else "全部行业",
                         "limited_by_candidate_limit": matched_count > len(candidates),
                     },
                 }
@@ -480,23 +678,28 @@ class PresetScreeningService:
             "amount": self._safe_float(sample.get("amount")),
         }
 
-    async def _load_recent_daily_history(self, code: str, days: int = 90) -> HistoryLoadResult:
+    async def _load_recent_daily_history(
+        self,
+        code: str,
+        days: int = 90,
+        required_rows: int = PULLBACK_LOOKBACK_DAYS,
+    ) -> HistoryLoadResult:
         mongo_history = await self._load_recent_daily_history_from_mongo(code, days)
         mongo_rows = len(mongo_history)
-        if mongo_rows >= PULLBACK_LOOKBACK_DAYS:
+        if mongo_rows >= required_rows:
             return HistoryLoadResult(data=mongo_history, source="mongodb", mongo_rows=mongo_rows)
 
         logger.info(
             "[preset_screening] MongoDB历史日线不足，跳过在线回退: code=%s mongo_rows=%s required=%s",
             code,
             mongo_rows,
-            PULLBACK_LOOKBACK_DAYS,
+            required_rows,
         )
         return HistoryLoadResult(
             data=mongo_history,
             source="mongodb_short",
             mongo_rows=mongo_rows,
-            error=f"MongoDB历史日线不足，请先执行A股全量数据预热或单股同步: {mongo_rows}/{PULLBACK_LOOKBACK_DAYS}",
+            error=f"MongoDB历史日线不足，请先执行A股全量数据预热或单股同步: {mongo_rows}/{required_rows}",
         )
 
     async def _load_recent_daily_history_from_mongo(self, code: str, days: int = 90) -> pd.DataFrame:
@@ -877,6 +1080,210 @@ class PresetScreeningService:
             },
         }, diagnostic
 
+    def _evaluate_positive_rubbing_line_candidate(
+        self,
+        candidate: Dict[str, Any],
+        history: pd.DataFrame,
+        params: Optional[Dict[str, float]] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        params = params or {}
+        body_ratio = float(params.get("body_ratio", DEFAULT_RUBBING_BODY_RATIO))
+        long_shadow_ratio = float(params.get("long_shadow_ratio", DEFAULT_RUBBING_LONG_SHADOW_RATIO))
+        short_shadow_ratio = float(params.get("short_shadow_ratio", DEFAULT_RUBBING_SHORT_SHADOW_RATIO))
+        combined_body_ratio = float(params.get("combined_body_ratio", DEFAULT_RUBBING_COMBINED_BODY_RATIO))
+        volume_ratio_limit = float(params.get("volume_ratio", DEFAULT_RUBBING_VOLUME_RATIO))
+        code = str(candidate.get("code") or "").zfill(6)
+        diagnostic: Dict[str, Any] = {
+            "code": code,
+            "name": candidate.get("name") or code,
+            "industry": candidate.get("industry"),
+            "stage_results": {},
+            "metrics": {},
+            "failed_stage": None,
+            "failed_reason": None,
+        }
+
+        if history is None or len(history) < 6:
+            diagnostic["stage_results"]["history_ready"] = False
+            diagnostic["metrics"]["history_rows"] = 0 if history is None else len(history)
+            diagnostic["failed_stage"] = "history_ready"
+            diagnostic["failed_reason"] = "历史日线不足6条"
+            return None, diagnostic
+
+        df = self._normalize_history(history)
+        if len(df) < 6:
+            diagnostic["stage_results"]["history_ready"] = False
+            diagnostic["metrics"]["history_rows"] = len(df)
+            diagnostic["failed_stage"] = "history_ready"
+            diagnostic["failed_reason"] = "历史日线清洗后不足6条"
+            return None, diagnostic
+
+        diagnostic["stage_results"]["history_ready"] = True
+        diagnostic["metrics"]["history_rows"] = len(df)
+        upper_day = df.iloc[-2]
+        lower_day = df.iloc[-1]
+        upper_metrics = self._candle_shadow_metrics(upper_day)
+        lower_metrics = self._candle_shadow_metrics(lower_day)
+        diagnostic["metrics"].update(
+            {
+                "upper_shadow_date": upper_day.get("trade_date"),
+                "lower_shadow_date": lower_day.get("trade_date"),
+                "upper_body_ratio": upper_metrics.get("body_ratio_pct"),
+                "upper_shadow_ratio": upper_metrics.get("upper_shadow_ratio_pct"),
+                "upper_lower_shadow_ratio": upper_metrics.get("lower_shadow_ratio_pct"),
+                "lower_body_ratio": lower_metrics.get("body_ratio_pct"),
+                "lower_shadow_ratio": lower_metrics.get("lower_shadow_ratio_pct"),
+                "lower_upper_shadow_ratio": lower_metrics.get("upper_shadow_ratio_pct"),
+                "latest_open": self._safe_float(lower_day.get("open")),
+                "latest_close": self._safe_float(lower_day.get("close")),
+                "latest_volume": self._safe_float(lower_day.get("volume")),
+            }
+        )
+
+        inverted_t = (
+            bool(upper_metrics.get("valid"))
+            and upper_metrics["body_ratio"] <= body_ratio
+            and upper_metrics["upper_shadow_ratio"] >= long_shadow_ratio
+            and upper_metrics["lower_shadow_ratio"] <= short_shadow_ratio
+        )
+        diagnostic["stage_results"]["inverted_t"] = bool(inverted_t)
+        if not inverted_t:
+            diagnostic["failed_stage"] = "inverted_t"
+            diagnostic["failed_reason"] = "首日未满足小实体、长上影、短下影的倒T字线"
+            return None, diagnostic
+
+        t_line = (
+            bool(lower_metrics.get("valid"))
+            and lower_metrics["body_ratio"] <= body_ratio
+            and lower_metrics["lower_shadow_ratio"] >= long_shadow_ratio
+            and lower_metrics["upper_shadow_ratio"] <= short_shadow_ratio
+        )
+        diagnostic["stage_results"]["t_line"] = bool(t_line)
+        if not t_line:
+            diagnostic["failed_stage"] = "t_line"
+            diagnostic["failed_reason"] = "次日未满足小实体、长下影、短上影的T字线"
+            return None, diagnostic
+
+        combined_high = max(float(upper_day["high"]), float(lower_day["high"]))
+        combined_low = min(float(upper_day["low"]), float(lower_day["low"]))
+        combined_range = combined_high - combined_low
+        combined_body = abs(float(lower_day["close"]) - float(upper_day["open"]))
+        combined_ratio = combined_body / combined_range if combined_range > 0 else 1.0
+        combined_doji = combined_range > 0 and combined_ratio <= combined_body_ratio
+        diagnostic["metrics"].update(
+            {
+                "combined_high": self._safe_float(combined_high),
+                "combined_low": self._safe_float(combined_low),
+                "combined_body_ratio": self._safe_float(combined_ratio * 100),
+            }
+        )
+        diagnostic["stage_results"]["combined_doji"] = bool(combined_doji)
+        if not combined_doji:
+            diagnostic["failed_stage"] = "combined_doji"
+            diagnostic["failed_reason"] = "两日合成实体过大，未等效十字线"
+            return None, diagnostic
+
+        volume_base = df.iloc[-6:-1]["volume"].mean()
+        latest_volume = float(lower_day["volume"])
+        volume_shrink_ratio = latest_volume / volume_base if volume_base > 0 else None
+        volume_shrink = volume_shrink_ratio is not None and volume_shrink_ratio <= volume_ratio_limit
+        diagnostic["metrics"].update(
+            {
+                "avg_volume_prev5": self._safe_float(volume_base),
+                "volume_shrink_ratio": self._safe_float(volume_shrink_ratio),
+                "volume_shrink_ratio_pct": self._safe_float(volume_shrink_ratio * 100 if volume_shrink_ratio is not None else None),
+                "volume_ratio_limit": self._safe_float(volume_ratio_limit),
+            }
+        )
+        diagnostic["stage_results"]["volume_shrink"] = bool(volume_shrink)
+        if not volume_shrink:
+            diagnostic["failed_stage"] = "volume_shrink"
+            diagnostic["failed_reason"] = f"最新成交量未缩至此前5日均量的{volume_ratio_limit * 100:g}%以内"
+            return None, diagnostic
+
+        recent_rows = []
+        for _, row in df.tail(5).iterrows():
+            recent_rows.append(
+                {
+                    "trade_date": row["trade_date"],
+                    "close": self._safe_float(row.get("close")),
+                    "pct_chg": self._safe_float(row.get("pct_chg")),
+                    "amount": self._safe_float(row.get("amount")),
+                    "volume": self._safe_float(row.get("volume")),
+                }
+            )
+
+        day_change_pct = (
+            (float(lower_day["close"]) / float(df.iloc[-2]["close"]) - 1) * 100
+            if float(df.iloc[-2]["close"]) else 0
+        )
+        diagnostic["matched"] = True
+        return {
+            "code": code,
+            "symbol": code,
+            "name": candidate.get("name") or code,
+            "market": "A股",
+            "industry": candidate.get("industry"),
+            "board": candidate.get("board") or candidate.get("market"),
+            "total_mv": self._safe_float(candidate.get("total_mv")),
+            "circ_mv": self._safe_float(candidate.get("circ_mv")),
+            "close": self._safe_float(lower_day.get("close")),
+            "pct_chg": self._safe_float(lower_day.get("pct_chg")) or self._safe_float(day_change_pct),
+            "amount": self._safe_float(candidate.get("amount")) or self._safe_float(lower_day.get("amount")),
+            "turnover_rate": self._safe_float(candidate.get("turnover_rate")),
+            "turnover_rate_f": self._safe_float(candidate.get("turnover_rate_f")),
+            "pattern": "缩量正揉搓线",
+            "pattern_date": lower_day.get("trade_date"),
+            "upper_shadow_date": upper_day.get("trade_date"),
+            "lower_shadow_date": lower_day.get("trade_date"),
+            "upper_body_ratio": upper_metrics.get("body_ratio_pct"),
+            "upper_shadow_ratio": upper_metrics.get("upper_shadow_ratio_pct"),
+            "lower_body_ratio": lower_metrics.get("body_ratio_pct"),
+            "lower_shadow_ratio": lower_metrics.get("lower_shadow_ratio_pct"),
+            "combined_body_ratio": self._safe_float(combined_ratio * 100),
+            "avg_volume_prev5": self._safe_float(volume_base),
+            "latest_volume": self._safe_float(latest_volume),
+            "volume_shrink_ratio": self._safe_float(volume_shrink_ratio),
+            "recent_5d": recent_rows,
+            "matched_conditions": {
+                "history_ready": True,
+                "inverted_t": True,
+                "t_line": True,
+                "combined_doji": True,
+                "volume_shrink": True,
+            },
+        }, diagnostic
+
+    def _candle_shadow_metrics(self, row: pd.Series) -> Dict[str, Any]:
+        open_price = self._safe_float(row.get("open"))
+        high = self._safe_float(row.get("high"))
+        low = self._safe_float(row.get("low"))
+        close = self._safe_float(row.get("close"))
+        if open_price is None or high is None or low is None or close is None:
+            return {"valid": False}
+        candle_range = high - low
+        if candle_range <= 0:
+            return {"valid": False, "range": candle_range}
+        body = abs(close - open_price)
+        upper_shadow = high - max(open_price, close)
+        lower_shadow = min(open_price, close) - low
+        body_ratio = body / candle_range
+        upper_shadow_ratio = max(upper_shadow, 0) / candle_range
+        lower_shadow_ratio = max(lower_shadow, 0) / candle_range
+        return {
+            "valid": True,
+            "range": self._safe_float(candle_range),
+            "body": self._safe_float(body),
+            "upper_shadow": self._safe_float(max(upper_shadow, 0)),
+            "lower_shadow": self._safe_float(max(lower_shadow, 0)),
+            "body_ratio": body_ratio,
+            "upper_shadow_ratio": upper_shadow_ratio,
+            "lower_shadow_ratio": lower_shadow_ratio,
+            "body_ratio_pct": self._safe_float(body_ratio * 100),
+            "upper_shadow_ratio_pct": self._safe_float(upper_shadow_ratio * 100),
+            "lower_shadow_ratio_pct": self._safe_float(lower_shadow_ratio * 100),
+        }
+
     def _get_turnover_rate_f(
         self,
         code: str,
@@ -1022,7 +1429,10 @@ class PresetScreeningService:
             },
         }
 
-    def _create_stage_stats(self) -> Dict[str, Dict[str, Any]]:
+    def _create_stage_stats(
+        self,
+        stages: Sequence[Tuple[str, str, str]] = TREND_START_TRACE_STAGES,
+    ) -> Dict[str, Dict[str, Any]]:
         return {
             key: {
                 "checked": 0,
@@ -1031,7 +1441,7 @@ class PresetScreeningService:
                 "pass_samples": [],
                 "rejected_samples": [],
             }
-            for key, _, _ in TREND_START_TRACE_STAGES
+            for key, _, _ in stages
         }
 
     def _record_diagnostic(
@@ -1039,7 +1449,9 @@ class PresetScreeningService:
         trace: Dict[str, Any],
         stage_stats: Dict[str, Dict[str, int]],
         diagnostic: Dict[str, Any],
+        stage_labels: Optional[Dict[str, str]] = None,
     ) -> None:
+        stage_labels = stage_labels or TREND_START_STAGE_LABELS
         stage_results = diagnostic.get("stage_results") or {}
         for stage_key, passed in stage_results.items():
             if stage_key not in stage_stats:
@@ -1058,7 +1470,7 @@ class PresetScreeningService:
             return
 
         failed_stage = diagnostic.get("failed_stage") or "unknown"
-        label = TREND_START_STAGE_LABELS.get(failed_stage, failed_stage)
+        label = stage_labels.get(failed_stage, failed_stage)
         failure_reasons = trace.setdefault("failure_reasons", {})
         failure_reasons[label] = failure_reasons.get(label, 0) + 1
 
@@ -1094,12 +1506,19 @@ class PresetScreeningService:
                 }
             )
 
-    def _build_stage_steps(self, stage_stats: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _build_stage_steps(
+        self,
+        stage_stats: Dict[str, Dict[str, Any]],
+        stages: Sequence[Tuple[str, str, str]] = TREND_START_TRACE_STAGES,
+    ) -> List[Dict[str, Any]]:
         steps: List[Dict[str, Any]] = []
-        for key, label, description in TREND_START_TRACE_STAGES:
+        for key, label, description in stages:
             if (
-                (key == "price_consolidation" and SKIP_PRICE_CONSOLIDATION_FILTER)
-                or (key == "ma_up" and SKIP_MA_UP_FILTER)
+                stages == TREND_START_TRACE_STAGES
+                and (
+                    (key == "price_consolidation" and SKIP_PRICE_CONSOLIDATION_FILTER)
+                    or (key == "ma_up" and SKIP_MA_UP_FILTER)
+                )
             ):
                 continue
             stats = stage_stats[key]
@@ -1170,6 +1589,37 @@ class PresetScreeningService:
                 "close_position_20d",
                 "distribution_risk",
                 "bull_trap_risk",
+            ],
+            "history_ready": [
+                "history_source",
+                "history_rows",
+                "history_mongo_rows",
+                "history_tushare_rows",
+                "history_load_error",
+            ],
+            "inverted_t": [
+                "upper_shadow_date",
+                "upper_body_ratio",
+                "upper_shadow_ratio",
+                "upper_lower_shadow_ratio",
+            ],
+            "t_line": [
+                "lower_shadow_date",
+                "lower_body_ratio",
+                "lower_shadow_ratio",
+                "lower_upper_shadow_ratio",
+            ],
+            "combined_doji": [
+                "combined_high",
+                "combined_low",
+                "combined_body_ratio",
+            ],
+            "volume_shrink": [
+                "latest_volume",
+                "avg_volume_prev5",
+                "volume_shrink_ratio",
+                "volume_shrink_ratio_pct",
+                "volume_ratio_limit",
             ],
         }.get(stage_key, [])
         return {

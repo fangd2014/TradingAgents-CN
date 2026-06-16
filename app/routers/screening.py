@@ -107,6 +107,22 @@ SCREENING_STRATEGIES: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "positive_rubbing_line",
+        "name": "缩量正揉搓线",
+        "description": "最近两日先倒T后T，实体都很小，两日合成十字线，最新成交量缩至此前5日均量的7成以内。",
+        "tags": ["揉搓线", "先长上影", "后长下影", "缩量", "十字线"],
+        "fields": [
+            {"key": "industries", "label": "行业范围", "component": "industry-select", "multiple": True, "default": []},
+            _number_field("limit", "结果数量", 100, 1, 200, 10, "只"),
+            _number_field("candidate_limit", "候选扫描", 1000, 20, 5000, 100, "只"),
+            _number_field("body_ratio", "实体占振幅上限", 15, 1, 40, 1, "%"),
+            _number_field("long_shadow_ratio", "长影线占振幅下限", 50, 20, 90, 1, "%"),
+            _number_field("short_shadow_ratio", "短影线占振幅上限", 25, 0, 50, 1, "%"),
+            _number_field("combined_body_ratio", "合成实体占比上限", 15, 1, 40, 1, "%"),
+            _number_field("volume_ratio", "缩量比例", 70, 10, 120, 5, "%"),
+        ],
+    },
+    {
         "id": "low_valuation_quality",
         "name": "低估值高ROE",
         "description": "以估值、ROE和市值约束筛选基本面质量较好的标的。",
@@ -207,6 +223,18 @@ async def _execute_strategy(strategy_id: str, parameters: Dict[str, Any]) -> Dic
             float_cap_limit=float(parameters.get("float_cap_limit") or 500),
             min_five_day_turnover=float(parameters.get("min_five_day_turnover") or 5),
             volume_breakout_multiplier=float(parameters.get("volume_breakout_multiplier") or 4),
+        )
+
+    if strategy_id == "positive_rubbing_line":
+        return await preset_svc.run_positive_rubbing_line_preset(
+            limit=int(parameters.get("limit") or 100),
+            candidate_limit=int(parameters.get("candidate_limit") or 1000),
+            industries=parameters.get("industries") or None,
+            body_ratio=float(parameters.get("body_ratio") or 15) / 100,
+            long_shadow_ratio=float(parameters.get("long_shadow_ratio") or 50) / 100,
+            short_shadow_ratio=float(parameters.get("short_shadow_ratio") or 25) / 100,
+            combined_body_ratio=float(parameters.get("combined_body_ratio") or 15) / 100,
+            volume_ratio=float(parameters.get("volume_ratio") or 70) / 100,
         )
 
     if strategy_id == "custom_strategy":

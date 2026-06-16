@@ -559,6 +559,33 @@
 
         <el-table-column
           v-if="resultMode === 'preset'"
+          label="形态"
+          width="130"
+        >
+          <template #default="{ row }">
+            <el-popover
+              v-if="row.pattern"
+              placement="left"
+              trigger="click"
+              width="360"
+            >
+              <template #reference>
+                <el-button type="text" size="small">{{ row.pattern }}</el-button>
+              </template>
+              <div class="chip-popover">
+                <div>日期：{{ row.pattern_date || row.lower_shadow_date || '-' }}</div>
+                <div>首日倒T：实体{{ formatTraceNumber(row.upper_body_ratio) }}%，上影{{ formatTraceNumber(row.upper_shadow_ratio) }}%</div>
+                <div>次日T线：实体{{ formatTraceNumber(row.lower_body_ratio) }}%，下影{{ formatTraceNumber(row.lower_shadow_ratio) }}%</div>
+                <div>合成实体：{{ formatTraceNumber(row.combined_body_ratio) }}%</div>
+                <div>缩量比例：{{ formatTraceNumber((row.volume_shrink_ratio ?? 0) * 100) }}%</div>
+              </div>
+            </el-popover>
+            <span v-else class="text-gray-400">-</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          v-if="resultMode === 'preset'"
           prop="five_day_change_pct"
           label="近5日涨幅"
           width="120"
@@ -904,6 +931,22 @@ const loadScreeningStrategies = async () => {
           { key: 'float_cap_limit', label: '流通市值上限', component: 'number', default: 500, min: 50, max: 5000, step: 50, unit: '亿元' },
           { key: 'min_five_day_turnover', label: '上一交易日换手', component: 'number', default: 5, min: 0, max: 100, step: 1, unit: '%' },
           { key: 'volume_breakout_multiplier', label: '放量倍数', component: 'number', default: 4, min: 1, max: 20, step: 0.5, precision: 1, unit: '倍' }
+        ]
+      },
+      {
+        id: 'positive_rubbing_line',
+        name: '缩量正揉搓线',
+        description: '最近两日先倒T后T，实体都很小，两日合成十字线，最新成交量缩至此前5日均量的7成以内。',
+        tags: ['揉搓线', '长上影', '长下影', '缩量'],
+        fields: [
+          { key: 'industries', label: '行业范围', component: 'industry-select', multiple: true, default: [] },
+          { key: 'limit', label: '结果数量', component: 'number', default: 100, min: 1, max: 200, step: 10, unit: '只' },
+          { key: 'candidate_limit', label: '候选扫描', component: 'number', default: 1000, min: 20, max: 5000, step: 100, unit: '只' },
+          { key: 'body_ratio', label: '实体占振幅上限', component: 'number', default: 15, min: 1, max: 40, step: 1, unit: '%' },
+          { key: 'long_shadow_ratio', label: '长影线占振幅下限', component: 'number', default: 50, min: 20, max: 90, step: 1, unit: '%' },
+          { key: 'short_shadow_ratio', label: '短影线占振幅上限', component: 'number', default: 25, min: 0, max: 50, step: 1, unit: '%' },
+          { key: 'combined_body_ratio', label: '合成实体占比上限', component: 'number', default: 15, min: 1, max: 40, step: 1, unit: '%' },
+          { key: 'volume_ratio', label: '缩量比例', component: 'number', default: 70, min: 10, max: 120, step: 5, unit: '%' }
         ]
       }
     ]
@@ -1318,7 +1361,21 @@ const formatTraceMetricLabel = (key: string) => {
     turnover_rate_f: '自由流通换手率%',
     turnover_rate_trade_date: '换手率日期',
     turnover_rate_source: '换手率来源',
-    amount: '成交额'
+    amount: '成交额',
+    upper_shadow_date: '倒T日期',
+    lower_shadow_date: 'T线日期',
+    upper_body_ratio: '倒T实体%',
+    upper_shadow_ratio: '倒T上影%',
+    upper_lower_shadow_ratio: '倒T下影%',
+    lower_body_ratio: 'T线实体%',
+    lower_shadow_ratio: 'T线下影%',
+    lower_upper_shadow_ratio: 'T线上影%',
+    combined_high: '合成高点',
+    combined_low: '合成低点',
+    combined_body_ratio: '合成实体%',
+    avg_volume_prev5: '前5日均量',
+    volume_shrink_ratio_pct: '缩量比例%',
+    volume_ratio_limit: '缩量阈值'
   }
   return labelMap[key] || key
 }
