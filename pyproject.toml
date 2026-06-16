@@ -41,6 +41,7 @@ dependencies = [
     "baostock>=0.8.8",
     "eodhd>=1.0.32",
     "finnhub-python>=2.4.23",
+    "iFinDAPI==0.0.8",
     # mootdx pins httpx<0.26 while chainlit/mcp requires httpx>=0.27;
     # Docker installs mootdx separately with --no-deps for the runtime data path.
     "pywencai>=0.13.1",

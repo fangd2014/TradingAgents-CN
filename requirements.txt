@@ -20,6 +20,7 @@ akshare>=1.17.86
 tushare
 baostock
 finnhub-python
+iFinDAPI==0.0.8
 # mootdx is installed separately in Docker because it pins httpx<0.26.
 pywencai>=0.13.1
 parsel

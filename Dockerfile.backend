@@ -19,6 +19,7 @@ WORKDIR /app
 # - curl: 健康检查
 # - pandoc/wkhtmltopdf: 报告导出
 # - 中文字体: 用于 PDF 中文显示
+# - libidn12: iFinDAPI native library compatibility
 RUN mkdir -p /app/logs /app/data /app/config && \
     # 配置 apt 重试和超时
     echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries && \
@@ -31,11 +32,14 @@ RUN mkdir -p /app/logs /app/data /app/config && \
         curl \
         fontconfig \
         fonts-noto-cjk \
+        libidn12 \
         nodejs \
         pandoc \
         tzdata \
         wkhtmltopdf \
         xvfb && \
+    ln -sf /usr/lib/$(uname -m)-linux-gnu/libidn.so.12 /usr/lib/$(uname -m)-linux-gnu/libidn.so.11 && \
+    ldconfig && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo "$TZ" > /etc/timezone && \
     # 更新字体缓存
